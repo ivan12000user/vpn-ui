@@ -892,7 +892,7 @@ const SCRIPT: &str = r#"
       return;
     }
 
-    const delay = document.hidden ? 30000 : 5000;
+    const delay = document.hidden ? 60000 : 15000;
 
     timer = setTimeout(async () => {
       await refreshStatus();
