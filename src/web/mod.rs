@@ -295,23 +295,23 @@ fn peer_table(peers: &[PeerStatus]) -> String {
         rows.push_str(&format!(
             r#"
 <tr data-peer-key="{full_key}">
-  <td class="status-cell">
+  <td class="status-cell" data-label="Статус">
     <span class="badge {status_class}">{status_text}</span>
   </td>
 
-  <td>
+  <td class="peer-name-cell" data-label="Имя">
     <strong class="peer-name">{name}</strong>
   </td>
 
-  <td class="peer-ip mono">{vpn_ip}</td>
-  <td class="peer-endpoint mono">{endpoint}</td>
-  <td class="peer-provider">{provider}</td>
-  <td class="peer-location">{location}</td>
-  <td class="peer-handshake">{handshake}</td>
-  <td class="peer-rx">{rx}</td>
-  <td class="peer-tx">{tx}</td>
+  <td class="peer-ip mono" data-label="VPN IP">{vpn_ip}</td>
+  <td class="peer-endpoint mono" data-label="Endpoint">{endpoint}</td>
+  <td class="peer-provider" data-label="Провайдер / ASN">{provider}</td>
+  <td class="peer-location" data-label="Местоположение">{location}</td>
+  <td class="peer-handshake" data-label="Handshake">{handshake}</td>
+  <td class="peer-rx" data-label="RX">{rx}</td>
+  <td class="peer-tx" data-label="TX">{tx}</td>
 
-  <td class="ping-cell">
+  <td class="ping-cell" data-label="Ping">
     <span class="ping-result">—</span>
     <button class="button small ping-button" type="button">Ping</button>
   </td>
@@ -444,7 +444,7 @@ body {
 .layout {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 230px 1fr;
+  grid-template-columns: 230px minmax(0, 1fr);
 }
 
 nav {
@@ -471,9 +471,10 @@ nav a {
 nav a:hover { background: var(--panel); }
 
 main {
-  padding: 38px;
+  padding: 32px;
   width: 100%;
-  max-width: 1500px;
+  max-width: none;
+  min-width: 0;
 }
 
 h1 {
@@ -644,6 +645,8 @@ h2 { margin-top: 0; }
 
 .table-wrap {
   overflow-x: auto;
+  width: 100%;
+  min-width: 0;
 }
 
 table {
@@ -654,9 +657,27 @@ table {
 th,
 td {
   border-bottom: 1px solid var(--border);
-  padding: 13px 11px;
+  padding: 11px 8px;
   text-align: left;
   white-space: nowrap;
+}
+
+.peer-endpoint {
+  font-size: 13px;
+}
+
+.peer-provider,
+.peer-location {
+  white-space: normal;
+  line-height: 1.3;
+  min-width: 145px;
+  max-width: 230px;
+}
+
+.peer-provider,
+.peer-location,
+.peer-name {
+  overflow-wrap: anywhere;
 }
 
 th {
@@ -674,13 +695,13 @@ tbody tr:hover { background: var(--panel2); }
 }
 
 .ping-cell {
-  min-width: 140px;
+  min-width: 116px;
 }
 
 .ping-result {
   display: inline-block;
-  min-width: 60px;
-  margin-right: 5px;
+  min-width: 48px;
+  margin-right: 4px;
 }
 
 .ping-result.ok {
@@ -714,26 +735,452 @@ tbody tr:hover { background: var(--panel2); }
   padding: 10px 0;
 }
 
-@media (max-width: 800px) {
-  .layout { grid-template-columns: 1fr; }
+/*
+ * 1400px и ниже:
+ * обычная 10-колоночная таблица превращается в карточки.
+ * Sidebar пока остаётся desktop.
+ */
+@media (max-width: 1400px) {
+  main {
+    padding: 26px;
+  }
+
+  .page-head {
+    gap: 16px;
+  }
+
+  .panel {
+    padding: 16px;
+  }
+
+  .table-wrap {
+    overflow: visible;
+  }
+
+  table {
+    display: block;
+    width: 100%;
+  }
+
+  thead {
+    display: none;
+  }
+
+  tbody {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    width: 100%;
+  }
+
+  tbody tr[data-peer-key] {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 12px;
+    align-content: start;
+
+    min-width: 0;
+    padding: 14px;
+
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+
+  tbody tr[data-peer-key]:hover {
+    border-color: #43515f;
+    background: var(--panel2);
+  }
+
+  tbody td {
+    grid-column: 1 / -1;
+
+    display: grid;
+    grid-template-columns: minmax(116px, 38%) minmax(0, 1fr);
+    gap: 10px;
+
+    min-width: 0;
+    padding: 7px 0;
+
+    border-bottom: 1px solid rgba(48, 57, 67, .65);
+
+    white-space: normal;
+    font-size: 13px;
+  }
+
+  tbody td::before {
+    content: attr(data-label);
+
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  tbody td:last-child {
+    border-bottom: 0;
+  }
+
+  /*
+   * Верх карточки:
+   * ONLINE слева, имя справа.
+   */
+  tbody .status-cell {
+    grid-column: 1;
+    display: flex;
+    align-items: center;
+
+    padding: 0 0 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  tbody .peer-name-cell {
+    grid-column: 2;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+
+    min-width: 0;
+    padding: 0 0 12px;
+    border-bottom: 1px solid var(--border);
+
+    text-align: right;
+  }
+
+  tbody .status-cell::before,
+  tbody .peer-name-cell::before {
+    display: none;
+  }
+
+  .peer-name {
+    min-width: 0;
+    font-size: 15px;
+  }
+
+  .peer-ip,
+  .peer-endpoint,
+  .peer-provider,
+  .peer-location,
+  .peer-handshake,
+  .peer-rx,
+  .peer-tx {
+    min-width: 0;
+    max-width: none;
+    overflow-wrap: anywhere;
+  }
+
+  .ping-cell {
+    min-width: 0;
+
+    grid-template-columns:
+      minmax(116px, 38%)
+      minmax(0, 1fr);
+
+    align-items: center;
+  }
+
+  .ping-result {
+    min-width: 0;
+    margin-right: 6px;
+  }
+}
+
+
+/*
+ * 900px и ниже:
+ * sidebar превращается в верхнюю навигацию.
+ */
+@media (max-width: 900px) {
+  .layout {
+    display: block;
+    min-height: 100vh;
+  }
 
   nav {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+
+    padding: 10px 12px;
+
+    background: var(--bg);
+
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
 
-  main { padding: 22px; }
-
-  .page-head { display: block; }
-
-  .toolbar {
-    margin-bottom: 20px;
+  .brand {
+    margin: 0 14px 0 0;
+    font-size: 18px;
   }
 
-  .summary { grid-template-columns: 1fr 1fr; }
+  nav a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+
+    margin: 0;
+    padding: 8px 10px;
+
+    font-size: 14px;
+  }
+
+  main {
+    padding: 18px;
+  }
+
+  h1 {
+    font-size: 28px;
+  }
+
+  .lead {
+    margin-bottom: 18px;
+  }
+
+  .page-head {
+    display: block;
+  }
+
+  .toolbar {
+    width: 100%;
+    margin: 14px 0 18px;
+
+    display: grid;
+    grid-template-columns:
+      auto
+      auto
+      minmax(180px, 1fr);
+
+    gap: 9px;
+  }
+
+  .filter-input {
+    width: 100%;
+  }
+
+  .auto-refresh {
+    align-self: center;
+  }
+
+  .summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .summary div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .summary div:nth-child(-n+2) {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .cards {
+    grid-template-columns:
+      repeat(auto-fit, minmax(260px, 1fr));
+  }
+}
+
+
+/*
+ * 700px и ниже:
+ * настоящий телефонный layout.
+ */
+@media (max-width: 700px) {
+  main {
+    padding: 12px;
+  }
+
+  h1 {
+    margin-bottom: 6px;
+    font-size: 25px;
+  }
+
+  h2 {
+    font-size: 20px;
+  }
+
+  nav {
+    padding: 8px;
+  }
+
+  .brand {
+    margin-right: 8px;
+  }
+
+  nav a {
+    padding: 8px;
+    font-size: 13px;
+  }
+
+  .toolbar {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .toolbar .button {
+    width: 100%;
+    min-height: 42px;
+  }
+
+  .filter-input {
+    grid-column: 1 / -1;
+
+    width: 100%;
+    min-height: 42px;
+
+    font-size: 16px;
+  }
+
+  .auto-refresh {
+    grid-column: 1;
+    min-height: 34px;
+
+    display: flex;
+    align-items: center;
+
+    font-size: 13px;
+  }
+
+  #last-updated {
+    grid-column: 2;
+
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+
+    text-align: right;
+    font-size: 12px;
+  }
+
+  .summary {
+    margin-bottom: 12px;
+  }
 
   .summary div {
-    border-bottom: 1px solid var(--border);
+    padding: 12px;
+  }
+
+  .summary span {
+    margin-bottom: 4px;
+    font-size: 11px;
+  }
+
+  .summary strong {
+    font-size: 15px;
+  }
+
+  .panel {
+    padding: 11px;
+    border-radius: 10px;
+  }
+
+  .panel > h2 {
+    margin: 4px 3px 12px;
+  }
+
+  tbody {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  tbody tr[data-peer-key] {
+    padding: 13px;
+  }
+
+  tbody td {
+    grid-template-columns:
+      108px
+      minmax(0, 1fr);
+
+    gap: 8px;
+
+    padding: 7px 0;
+
+    font-size: 13px;
+  }
+
+  tbody td::before {
+    font-size: 11px;
+  }
+
+  .ping-cell {
+    grid-template-columns:
+      108px
+      minmax(0, 1fr);
+  }
+
+  .ping-cell > :last-child {
+    justify-self: end;
+  }
+
+  .button.small {
+    min-height: 34px;
+    padding: 6px 10px;
+  }
+
+  .cards {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .card {
+    padding: 17px;
+  }
+
+  .value {
+    margin-top: 20px;
+  }
+}
+
+
+/*
+ * Узкие телефоны ~320–430px.
+ */
+@media (max-width: 430px) {
+  .brand {
+    flex-basis: 100%;
+
+    margin: 0 0 4px;
+
+    text-align: center;
+  }
+
+  nav a {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .toolbar {
+    gap: 7px;
+  }
+
+  .summary div {
+    padding: 10px;
+  }
+
+  tbody tr[data-peer-key] {
+    padding: 11px;
+  }
+
+  tbody td,
+  .ping-cell {
+    grid-template-columns:
+      96px
+      minmax(0, 1fr);
+  }
+
+  .peer-name {
+    font-size: 14px;
+  }
+
+  .badge {
+    padding: 4px 7px;
+    font-size: 10px;
   }
 }
 "#;
