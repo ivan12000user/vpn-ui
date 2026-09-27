@@ -264,14 +264,49 @@ fn endpoint_ip(endpoint: &str) -> Option<String> {
 fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
-            !ip.is_private()
-                && !ip.is_loopback()
-                && !ip.is_link_local()
-                && !ip.is_multicast()
-                && !ip.is_unspecified()
+            let [a, b, c, _d] = ip.octets();
+
+            // Routable public IPv4 only.
+            if a == 0
+                || a == 10
+                || a == 127
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 224
+            {
+                return false;
+            }
+
+            true
         }
 
-        IpAddr::V6(ip) => !ip.is_loopback() && !ip.is_multicast() && !ip.is_unspecified(),
+        IpAddr::V6(ip) => {
+            if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+                return false;
+            }
+
+            let s = ip.segments();
+
+            // Only normal global-unicast IPv6 (2000::/3).
+            if !(0x2000..=0x3fff).contains(&s[0]) {
+                return false;
+            }
+
+            // Documentation prefix 2001:db8::/32.
+            if s[0] == 0x2001 && s[1] == 0x0db8 {
+                return false;
+            }
+
+            true
+        }
     }
 }
 
