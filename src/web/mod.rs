@@ -23,6 +23,10 @@ pub struct AppState {
     pub ping_command: String,
     pub wg_settings_command: String,
     pub awg_settings_command: String,
+
+    pub wg_client_config_command: String,
+    pub awg_client_config_command: String,
+
     pub geoip: GeoIpService,
 }
 
@@ -50,6 +54,11 @@ pub fn router(state: AppState) -> Router {
         .route("/wireguard", get(wireguard_page))
         .route("/amneziawg", get(amneziawg_page))
         .route("/settings", get(settings_page))
+        .route("/admin/client", get(crate::admin::client_page))
+        .route(
+            "/api/admin/client-config",
+            get(crate::admin::client_config_download),
+        )
         .route("/api/wireguard/status", get(wireguard_api))
         .route("/api/amneziawg/status", get(amneziawg_api))
         .route("/api/wireguard/ping", post(wireguard_ping))
@@ -394,7 +403,7 @@ fn provider_page(provider_id: &str, status: &InterfaceStatus) -> String {
     let peers = if status.peers.is_empty() {
         r#"<div class="empty">Пиры не найдены.</div>"#.to_string()
     } else {
-        peer_table(&status.peers)
+        peer_table(provider_id, &status.peers)
     };
 
     format!(
@@ -467,7 +476,7 @@ window.VPN_UI_PROVIDER = "{provider_id}";
     )
 }
 
-fn peer_table(peers: &[PeerStatus]) -> String {
+fn peer_table(provider_id: &str, peers: &[PeerStatus]) -> String {
     let mut rows = String::new();
 
     for peer in peers {
@@ -499,9 +508,25 @@ fn peer_table(peers: &[PeerStatus]) -> String {
     <span class="ping-result">—</span>
     <button class="button small ping-button" type="button">Ping</button>
   </td>
+
+  <td class="config-cell" data-label="Конфиг">
+    <form
+      class="config-form"
+      method="get"
+      action="/admin/client"
+      target="_blank"
+    >
+      <input type="hidden" name="provider" value="{provider_id}">
+      <input type="hidden" name="key" value="{full_key}">
+      <button class="button small config-button" type="submit">
+        Конфиг / QR
+      </button>
+    </form>
+  </td>
 </tr>
 "#,
             full_key = escape_html(&peer.public_key),
+            provider_id = escape_html(provider_id),
             name = escape_html(name),
             vpn_ip = escape_html(vpn_ip),
             endpoint = escape_html(peer.endpoint.as_deref().unwrap_or("—")),
@@ -528,6 +553,7 @@ fn peer_table(peers: &[PeerStatus]) -> String {
   <th>RX</th>
   <th>TX</th>
   <th>Ping</th>
+  <th>Конфиг</th>
 </tr>
 </thead>
 <tbody>
@@ -1057,6 +1083,18 @@ tbody tr:has(.badge.never) .peer-name-cell {
 
 .ping-result.error {
   color: var(--red);
+}
+
+.config-cell {
+  min-width: 116px;
+}
+
+.config-form {
+  margin: 0;
+}
+
+.config-button {
+  white-space: nowrap;
 }
 
 .filter-input {
@@ -1994,7 +2032,7 @@ const SCRIPT: &str = r#"
 })();
 "#;
 
-fn layout(title: &str, body: &str) -> String {
+pub(crate) fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
     let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
