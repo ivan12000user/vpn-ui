@@ -468,7 +468,15 @@ nav a {
   border-radius: 8px;
 }
 
-nav a:hover { background: var(--panel); }
+.nav-link.active {
+  background: var(--panel);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  nav a:not(.active):hover {
+    background: var(--panel);
+  }
+}
 
 main {
   padding: 32px;
@@ -526,6 +534,19 @@ h2 { margin-top: 0; }
   cursor: default;
 }
 
+.toolbar .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+#refresh-button {
+  min-width: 104px;
+}
+
+#ping-all-button {
+  min-width: 118px;
+}
+
 .button.small {
   font-size: 12px;
   padding: 5px 8px;
@@ -575,6 +596,10 @@ h2 { margin-top: 0; }
 }
 
 .muted { color: var(--muted); }
+
+.refresh-error {
+  color: var(--yellow);
+}
 
 .summary {
   display: grid;
@@ -874,14 +899,25 @@ tbody tr:hover { background: var(--panel2); }
 
     grid-template-columns:
       minmax(116px, 38%)
-      minmax(0, 1fr);
+      minmax(48px, 1fr)
+      auto;
 
     align-items: center;
   }
 
+  .ping-cell::before {
+    grid-column: 1;
+  }
+
   .ping-result {
+    grid-column: 2;
     min-width: 0;
     margin-right: 6px;
+  }
+
+  .ping-button {
+    grid-column: 3;
+    justify-self: end;
   }
 }
 
@@ -1111,11 +1147,8 @@ tbody tr:hover { background: var(--panel2); }
   .ping-cell {
     grid-template-columns:
       108px
-      minmax(0, 1fr);
-  }
-
-  .ping-cell > :last-child {
-    justify-self: end;
+      minmax(48px, 1fr)
+      auto;
   }
 
   .button.small {
@@ -1167,11 +1200,17 @@ tbody tr:hover { background: var(--panel2); }
     padding: 11px;
   }
 
-  tbody td,
-  .ping-cell {
+  tbody td {
     grid-template-columns:
       96px
       minmax(0, 1fr);
+  }
+
+  .ping-cell {
+    grid-template-columns:
+      96px
+      minmax(42px, 1fr)
+      auto;
   }
 
   .peer-name {
@@ -1441,9 +1480,24 @@ const SCRIPT: &str = r#"
       lastUpdated.textContent =
         "Обновлено " + new Date().toLocaleTimeString();
 
+      lastUpdated.title = "";
+      lastUpdated.classList.remove("refresh-error");
+
     } catch (error) {
-      lastUpdated.textContent =
-        "Ошибка обновления: " + error.message;
+      const retrySeconds = document.hidden ? 60 : 15;
+
+      if (autoRefresh?.checked) {
+        lastUpdated.textContent =
+          `Нет связи · повтор через ${retrySeconds} с`;
+      } else {
+        lastUpdated.textContent = "Нет связи";
+      }
+
+      lastUpdated.title =
+        "Ошибка обновления: " +
+        (error?.message || String(error));
+
+      lastUpdated.classList.add("refresh-error");
 
     } finally {
       refreshing = false;
@@ -1587,6 +1641,10 @@ const SCRIPT: &str = r#"
 "#;
 
 fn layout(title: &str, body: &str) -> String {
+    let overview_active = if title == "Обзор" { " active" } else { "" };
+    let wireguard_active = if title == "WireGuard" { " active" } else { "" };
+    let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
+
     format!(
         r#"<!doctype html>
 <html lang="ru">
@@ -1600,9 +1658,9 @@ fn layout(title: &str, body: &str) -> String {
 <div class="layout">
 <nav>
   <div class="brand">VPN UI</div>
-  <a href="/">Обзор</a>
-  <a href="/wireguard">WireGuard</a>
-  <a href="/amneziawg">AmneziaWG</a>
+  <a class="nav-link{overview_active}" href="/">Обзор</a>
+  <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
+  <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG</a>
 </nav>
 <main>{body}</main>
 </div>
@@ -1612,5 +1670,8 @@ fn layout(title: &str, body: &str) -> String {
         title = escape_html(title),
         style = STYLE,
         script = SCRIPT,
+        overview_active = overview_active,
+        wireguard_active = wireguard_active,
+        amneziawg_active = amneziawg_active,
     )
 }
