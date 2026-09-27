@@ -44,6 +44,13 @@ async fn main() {
 
         ping_command: env::var("VPN_UI_PING_COMMAND")
             .unwrap_or_else(|_| "/usr/bin/ping".to_string()),
+
+        wg_settings_command: env::var("VPN_UI_WG_SETTINGS_COMMAND")
+            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-wg-settings".to_string()),
+
+        awg_settings_command: env::var("VPN_UI_AWG_SETTINGS_COMMAND")
+            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg-settings".to_string()),
+
         geoip,
     };
 

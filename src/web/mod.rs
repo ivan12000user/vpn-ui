@@ -13,12 +13,16 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::process::Command;
 
 #[derive(Clone)]
 pub struct AppState {
     pub wireguard: ProviderConfig,
     pub amneziawg: ProviderConfig,
     pub ping_command: String,
+    pub wg_settings_command: String,
+    pub awg_settings_command: String,
     pub geoip: GeoIpService,
 }
 
@@ -34,11 +38,18 @@ struct PingRequest {
     public_key: String,
 }
 
+#[derive(Default)]
+struct SettingsResult {
+    values: HashMap<String, String>,
+    error: Option<String>,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/wireguard", get(wireguard_page))
         .route("/amneziawg", get(amneziawg_page))
+        .route("/settings", get(settings_page))
         .route("/api/wireguard/status", get(wireguard_api))
         .route("/api/amneziawg/status", get(amneziawg_api))
         .route("/api/wireguard/ping", post(wireguard_ping))
@@ -71,7 +82,7 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
   {}
 </div>
 
-<p class="muted">Версия {} — read-only.</p>
+<p class="muted">Версия {}.</p>
 "#,
         dashboard_card("/wireguard", &wg),
         dashboard_card("/amneziawg", &awg),
@@ -166,6 +177,12 @@ fn dashboard_card(path: &str, status: &InterfaceStatus) -> String {
         .map(|v| format!("UDP {v}"))
         .unwrap_or_else(|| "UDP —".to_string());
 
+    let online = status
+        .peers
+        .iter()
+        .filter(|peer| handshake_status(peer.latest_handshake).0 == "ok")
+        .count();
+
     format!(
         r#"
 <a class="card" href="{path}">
@@ -175,12 +192,179 @@ fn dashboard_card(path: &str, status: &InterfaceStatus) -> String {
   </div>
   <div class="value">{interface}</div>
   <div class="muted">{port}</div>
-  <div class="metric">{peers} пиров</div>
+  <div class="metric">
+    <strong class="metric-online">{online}</strong> онлайн
+    <span class="metric-separator">/</span>
+    <strong>{peers}</strong> всего
+  </div>
 </a>
 "#,
         provider = escape_html(&status.provider),
         interface = escape_html(&status.interface),
+        online = online,
         peers = status.peers.len(),
+    )
+}
+
+async fn read_settings(command: &str) -> SettingsResult {
+    let output = match Command::new(command).output().await {
+        Ok(output) => output,
+        Err(err) => {
+            return SettingsResult {
+                values: HashMap::new(),
+                error: Some(format!("cannot execute {command}: {err}")),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        return SettingsResult {
+            values: HashMap::new(),
+            error: Some(if stderr.is_empty() {
+                format!("{command} returned {}", output.status)
+            } else {
+                stderr
+            }),
+        };
+    }
+
+    let mut values = HashMap::new();
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.splitn(2, '\t');
+
+        let key = fields.next().unwrap_or_default().trim();
+        let value = fields.next().unwrap_or_default().trim();
+
+        if !key.is_empty() {
+            values.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    SettingsResult {
+        values,
+        error: None,
+    }
+}
+
+async fn settings_page(State(state): State<AppState>) -> impl IntoResponse {
+    let (wg, awg) = tokio::join!(
+        read_settings(&state.wg_settings_command),
+        read_settings(&state.awg_settings_command)
+    );
+
+    let wg_fields = [
+        ("Address", "Адрес интерфейса"),
+        ("ListenPort", "UDP порт"),
+        ("MTU", "MTU"),
+        ("Table", "Таблица маршрутизации"),
+    ];
+
+    let awg_fields = [
+        ("Address", "Адрес интерфейса"),
+        ("ListenPort", "UDP порт"),
+        ("Jc", "Jc"),
+        ("Jmin", "Jmin"),
+        ("Jmax", "Jmax"),
+        ("S1", "S1"),
+        ("S2", "S2"),
+        ("S3", "S3"),
+        ("S4", "S4"),
+        ("H1", "H1"),
+        ("H2", "H2"),
+        ("H3", "H3"),
+        ("H4", "H4"),
+    ];
+
+    let body = format!(
+        r#"
+<div class="page-head settings-head">
+  <div>
+    <h1>Настройки</h1>
+    <p class="lead">
+      Основные параметры интерфейсов WireGuard и AmneziaWG.
+    </p>
+  </div>
+</div>
+
+<div class="settings-note">
+  На текущем этапе параметры доступны только для просмотра.
+  Изменение будет выполняться через backup, проверку и автоматический rollback.
+</div>
+
+<div class="settings-grid">
+  {wg}
+  {awg}
+</div>
+"#,
+        wg = settings_panel("WireGuard", &state.wireguard.interface, &wg, &wg_fields),
+        awg = settings_panel("AmneziaWG", &state.amneziawg.interface, &awg, &awg_fields),
+    );
+
+    Html(layout("Настройки", &body))
+}
+
+fn settings_panel(
+    title: &str,
+    interface: &str,
+    settings: &SettingsResult,
+    fields: &[(&str, &str)],
+) -> String {
+    let error = settings
+        .error
+        .as_ref()
+        .map(|value| {
+            format!(
+                r#"<div class="alert error">Не удалось прочитать настройки: {}</div>"#,
+                escape_html(value)
+            )
+        })
+        .unwrap_or_default();
+
+    let mut rows = String::new();
+
+    for (key, label) in fields {
+        let value = settings.values.get(*key).map(String::as_str).unwrap_or("—");
+
+        rows.push_str(&format!(
+            r#"
+<div class="setting-row">
+  <div class="setting-label">
+    <span>{label}</span>
+    <small>{key}</small>
+  </div>
+  <div class="setting-value mono">{value}</div>
+</div>
+"#,
+            label = escape_html(label),
+            key = escape_html(key),
+            value = escape_html(value),
+        ));
+    }
+
+    format!(
+        r#"
+<section class="settings-panel">
+  <div class="settings-panel-head">
+    <div>
+      <h2>{title}</h2>
+      <div class="muted mono">{interface}</div>
+    </div>
+  </div>
+
+  {error}
+
+  <div class="settings-list">
+    {rows}
+  </div>
+</section>
+"#,
+        title = escape_html(title),
+        interface = escape_html(interface),
+        error = error,
+        rows = rows,
     )
 }
 
@@ -295,7 +479,7 @@ fn peer_table(peers: &[PeerStatus]) -> String {
         rows.push_str(&format!(
             r#"
 <tr data-peer-key="{full_key}">
-  <td class="status-cell" data-label="Статус">
+  <td class="status-cell" aria-hidden="true">
     <span class="badge {status_class}">{status_text}</span>
   </td>
 
@@ -335,7 +519,6 @@ fn peer_table(peers: &[PeerStatus]) -> String {
 <table>
 <thead>
 <tr>
-  <th>Статус</th>
   <th>Имя</th>
   <th>VPN IP</th>
   <th>Endpoint</th>
@@ -465,16 +648,22 @@ nav a {
   text-decoration: none;
   padding: 11px 12px;
   margin-bottom: 6px;
+  border: 1px solid transparent;
   border-radius: 8px;
 }
 
 .nav-link.active {
-  background: var(--panel);
+  background: var(--accent);
+  color: #07111d;
+  border-color: var(--accent);
+  font-weight: 800;
+  box-shadow: 0 0 0 1px rgba(104, 168, 255, .18);
 }
 
 @media (hover: hover) and (pointer: fine) {
   nav a:not(.active):hover {
     background: var(--panel);
+    border-color: #43515f;
   }
 }
 
@@ -595,6 +784,19 @@ h2 { margin-top: 0; }
   font-size: 15px;
 }
 
+.metric strong {
+  font-size: 18px;
+}
+
+.metric-online {
+  color: var(--green);
+}
+
+.metric-separator {
+  margin: 0 6px;
+  color: var(--muted);
+}
+
 .muted { color: var(--muted); }
 
 .refresh-error {
@@ -630,6 +832,82 @@ h2 { margin-top: 0; }
 .panel {
   padding: 21px;
   margin-bottom: 18px;
+}
+
+.settings-note {
+  margin-bottom: 18px;
+  padding: 13px 16px;
+
+  color: var(--muted);
+  background: var(--panel2);
+
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.settings-panel {
+  min-width: 0;
+
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+
+  overflow: hidden;
+}
+
+.settings-panel-head {
+  padding: 20px;
+
+  background: var(--panel2);
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-panel-head h2 {
+  margin: 0 0 5px;
+}
+
+.settings-list {
+  width: 100%;
+}
+
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(150px, .8fr) minmax(0, 1.2fr);
+  gap: 18px;
+
+  padding: 13px 18px;
+
+  border-bottom: 1px solid var(--border);
+}
+
+.setting-row:last-child {
+  border-bottom: 0;
+}
+
+.setting-label span {
+  display: block;
+  font-weight: 650;
+}
+
+.setting-label small {
+  display: block;
+  margin-top: 3px;
+
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.setting-value {
+  min-width: 0;
+
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .badge {
@@ -713,7 +991,51 @@ th {
 
 td { font-size: 14px; }
 
-tbody tr:hover { background: var(--panel2); }
+.status-cell {
+  display: none !important;
+}
+
+/*
+ * Статус пира показывается самой строкой.
+ * Скрытый badge остаётся внутренним источником статуса для JS.
+ */
+tbody tr:has(.badge.ok) td {
+  background: rgba(91, 197, 139, .055);
+}
+
+tbody tr:has(.badge.recent) td {
+  background: rgba(217, 182, 94, .055);
+}
+
+tbody tr:has(.badge.offline) td {
+  background: rgba(227, 108, 116, .055);
+}
+
+tbody tr:has(.badge.never) td {
+  background: rgba(148, 163, 179, .025);
+}
+
+tbody tr:has(.badge.ok) .peer-name-cell {
+  box-shadow: inset 4px 0 0 var(--green);
+}
+
+tbody tr:has(.badge.recent) .peer-name-cell {
+  box-shadow: inset 4px 0 0 var(--yellow);
+}
+
+tbody tr:has(.badge.offline) .peer-name-cell {
+  box-shadow: inset 4px 0 0 var(--red);
+}
+
+tbody tr:has(.badge.never) .peer-name-cell {
+  box-shadow: inset 4px 0 0 var(--muted);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  tbody tr:hover td {
+    filter: brightness(1.08);
+  }
+}
 
 .peer-name {
   display: block;
@@ -800,8 +1122,7 @@ tbody tr:hover { background: var(--panel2); }
 
   tbody tr[data-peer-key] {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    column-gap: 12px;
+    grid-template-columns: minmax(0, 1fr);
     align-content: start;
 
     min-width: 0;
@@ -809,12 +1130,38 @@ tbody tr:hover { background: var(--panel2); }
 
     background: var(--panel2);
     border: 1px solid var(--border);
+    border-left-width: 4px;
     border-radius: 10px;
   }
 
-  tbody tr[data-peer-key]:hover {
-    border-color: #43515f;
+  tbody tr[data-peer-key]:has(.badge.ok) {
+    background: rgba(91, 197, 139, .055);
+    border-left-color: var(--green);
+  }
+
+  tbody tr[data-peer-key]:has(.badge.recent) {
+    background: rgba(217, 182, 94, .055);
+    border-left-color: var(--yellow);
+  }
+
+  tbody tr[data-peer-key]:has(.badge.offline) {
+    background: rgba(227, 108, 116, .055);
+    border-left-color: var(--red);
+  }
+
+  tbody tr[data-peer-key]:has(.badge.never) {
     background: var(--panel2);
+    border-left-color: var(--muted);
+  }
+
+  tbody tr[data-peer-key] td {
+    background: transparent;
+  }
+
+  tbody tr[data-peer-key]:hover {
+    border-top-color: #43515f;
+    border-right-color: #43515f;
+    border-bottom-color: #43515f;
   }
 
   tbody td {
@@ -847,32 +1194,24 @@ tbody tr:hover { background: var(--panel2); }
   }
 
   /*
-   * Верх карточки:
-   * ONLINE слева, имя справа.
+   * Имя является заголовком карточки.
+   * Отдельного поля "Статус" больше нет.
    */
-  tbody .status-cell {
-    grid-column: 1;
-    display: flex;
-    align-items: center;
-
-    padding: 0 0 12px;
-    border-bottom: 1px solid var(--border);
-  }
-
   tbody .peer-name-cell {
-    grid-column: 2;
+    grid-column: 1 / -1;
+
     display: flex;
     align-items: center;
-    justify-content: flex-end;
 
     min-width: 0;
     padding: 0 0 12px;
-    border-bottom: 1px solid var(--border);
 
-    text-align: right;
+    border-bottom: 1px solid var(--border);
+    box-shadow: none !important;
+
+    text-align: left;
   }
 
-  tbody .status-cell::before,
   tbody .peer-name-cell::before {
     display: none;
   }
@@ -1018,6 +1357,10 @@ tbody tr:hover { background: var(--panel2); }
   .cards {
     grid-template-columns:
       repeat(auto-fit, minmax(260px, 1fr));
+  }
+
+  .settings-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1168,6 +1511,17 @@ tbody tr:hover { background: var(--panel2); }
   .value {
     margin-top: 20px;
   }
+
+  .setting-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+
+    padding: 12px 14px;
+  }
+
+  .setting-value {
+    text-align: left;
+  }
 }
 
 
@@ -1184,7 +1538,7 @@ tbody tr:hover { background: var(--panel2); }
   }
 
   nav a {
-    flex: 1 1 0;
+    flex: 1 1 calc(50% - 4px);
     min-width: 0;
   }
 
@@ -1644,6 +1998,11 @@ fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
     let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
+    let settings_active = if title == "Настройки" {
+        " active"
+    } else {
+        ""
+    };
 
     format!(
         r#"<!doctype html>
@@ -1661,6 +2020,7 @@ fn layout(title: &str, body: &str) -> String {
   <a class="nav-link{overview_active}" href="/">Обзор</a>
   <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
   <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG</a>
+  <a class="nav-link{settings_active}" href="/settings">Настройки</a>
 </nav>
 <main>{body}</main>
 </div>
@@ -1673,5 +2033,6 @@ fn layout(title: &str, body: &str) -> String {
         overview_active = overview_active,
         wireguard_active = wireguard_active,
         amneziawg_active = amneziawg_active,
+        settings_active = settings_active,
     )
 }
