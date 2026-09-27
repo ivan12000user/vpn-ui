@@ -1,17 +1,25 @@
 use serde::Serialize;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::process::Command;
+use tracing::warn;
 
 #[derive(Clone, Debug)]
 pub struct ProviderConfig {
     pub label: String,
     pub command: String,
+    pub metadata_command: String,
     pub interface: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PeerStatus {
     pub public_key: String,
+    pub name: Option<String>,
+    pub vpn_ip: Option<String>,
     pub endpoint: Option<String>,
     pub allowed_ips: String,
     pub latest_handshake: Option<u64>,
@@ -27,6 +35,15 @@ pub struct InterfaceStatus {
     pub public_key: Option<String>,
     pub listen_port: Option<u16>,
     pub peers: Vec<PeerStatus>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PingResult {
+    pub ok: bool,
+    pub ip: String,
+    pub avg_ms: Option<f64>,
+    pub received: usize,
     pub error: Option<String>,
 }
 
@@ -79,10 +96,29 @@ pub async fn query_provider(config: &ProviderConfig) -> InterfaceStatus {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    match parse_dump(&config.label, &config.interface, &stdout) {
+    let mut status = match parse_dump(&config.label, &config.interface, &stdout) {
         Ok(status) => status,
-        Err(err) => InterfaceStatus::failed(&config.label, &config.interface, err),
+        Err(err) => return InterfaceStatus::failed(&config.label, &config.interface, err),
+    };
+
+    match Command::new(&config.metadata_command).output().await {
+        Ok(output) if output.status.success() => {
+            let metadata = String::from_utf8_lossy(&output.stdout);
+            apply_metadata(&mut status, &metadata);
+        }
+        Ok(output) => {
+            warn!(
+                "{} metadata command failed: {}",
+                config.label,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Err(err) => {
+            warn!("{} metadata command failed: {}", config.label, err);
+        }
     }
+
+    status
 }
 
 fn parse_dump(provider: &str, interface: &str, dump: &str) -> Result<InterfaceStatus, String> {
@@ -101,9 +137,8 @@ fn parse_dump(provider: &str, interface: &str, dump: &str) -> Result<InterfaceSt
         ));
     }
 
-    // Important:
-    // fields[0] is the private key.
-    // It is deliberately ignored and never leaves this parser.
+    // fields[0] = interface private key.
+    // It is deliberately ignored.
     let public_key = value(fields.get(1).copied());
     let listen_port = fields.get(2).and_then(|v| v.parse::<u16>().ok());
 
@@ -120,8 +155,10 @@ fn parse_dump(provider: &str, interface: &str, dump: &str) -> Result<InterfaceSt
             continue;
         }
 
-        // fields[1] is the preshared key.
+        // fields[1] = peer preshared key.
         // It is deliberately ignored.
+        let allowed_ips = fields.get(3).copied().unwrap_or_default().to_string();
+
         let latest_handshake = fields
             .get(4)
             .and_then(|v| v.parse::<u64>().ok())
@@ -129,8 +166,10 @@ fn parse_dump(provider: &str, interface: &str, dump: &str) -> Result<InterfaceSt
 
         peers.push(PeerStatus {
             public_key: fields.first().copied().unwrap_or_default().to_string(),
+            name: None,
+            vpn_ip: vpn_ip_from_allowed(&allowed_ips),
             endpoint: fields.get(2).and_then(|v| value(Some(*v))),
-            allowed_ips: fields.get(3).copied().unwrap_or_default().to_string(),
+            allowed_ips,
             latest_handshake,
             rx_bytes: fields
                 .get(5)
@@ -157,11 +196,106 @@ fn parse_dump(provider: &str, interface: &str, dump: &str) -> Result<InterfaceSt
     })
 }
 
+fn apply_metadata(status: &mut InterfaceStatus, metadata: &str) {
+    let mut names = HashMap::new();
+
+    for line in metadata.lines() {
+        let mut fields = line.splitn(2, '\t');
+
+        let public_key = fields.next().unwrap_or_default().trim();
+        let name = fields.next().unwrap_or_default().trim();
+
+        if !public_key.is_empty() && !name.is_empty() {
+            names.insert(public_key.to_string(), name.to_string());
+        }
+    }
+
+    for peer in &mut status.peers {
+        if let Some(name) = names.get(&peer.public_key) {
+            peer.name = Some(name.clone());
+        }
+    }
+}
+
+fn vpn_ip_from_allowed(allowed_ips: &str) -> Option<String> {
+    let first = allowed_ips.split(',').next()?.trim();
+    let ip = first.split('/').next()?.trim();
+
+    ip.parse::<IpAddr>().ok().map(|value| value.to_string())
+}
+
 fn value(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|v| !v.is_empty() && *v != "(none)" && *v != "off")
         .map(ToString::to_string)
+}
+
+pub async fn ping_ip(command: &str, ip: &str) -> PingResult {
+    if ip.parse::<IpAddr>().is_err() {
+        return PingResult {
+            ok: false,
+            ip: ip.to_string(),
+            avg_ms: None,
+            received: 0,
+            error: Some("invalid IP address".to_string()),
+        };
+    }
+
+    let output = match Command::new(command)
+        .args(["-n", "-c", "3", "-W", "1", ip])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return PingResult {
+                ok: false,
+                ip: ip.to_string(),
+                avg_ms: None,
+                received: 0,
+                error: Some(format!("cannot execute ping: {err}")),
+            };
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut times = Vec::new();
+
+    for line in stdout.lines() {
+        for token in line.split_whitespace() {
+            if let Some(value) = token.strip_prefix("time=")
+                && let Ok(ms) = value.parse::<f64>()
+            {
+                times.push(ms);
+            } else if token.starts_with("time<") {
+                times.push(0.5);
+            }
+        }
+    }
+
+    let received = times.len();
+
+    if received == 0 {
+        return PingResult {
+            ok: false,
+            ip: ip.to_string(),
+            avg_ms: None,
+            received: 0,
+            error: Some("timeout".to_string()),
+        };
+    }
+
+    let avg_ms = times.iter().sum::<f64>() / received as f64;
+
+    PingResult {
+        ok: true,
+        ip: ip.to_string(),
+        avg_ms: Some(avg_ms),
+        received,
+        error: None,
+    }
 }
 
 pub fn now_epoch() -> u64 {
@@ -176,19 +310,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_wireguard_dump_without_exposing_private_material() {
+    fn parses_dump_without_exposing_private_material() {
         let input = concat!(
             "PRIVATE\tSERVER_PUBLIC\t51820\toff\n",
             "PEER_PUBLIC\tPSK\t1.2.3.4:12345\t10.0.0.2/32\t100\t1024\t2048\t15\n",
         );
 
-        let status = parse_dump("WireGuard", "wg0", input).unwrap();
+        let mut status = parse_dump("WireGuard", "wg0", input).unwrap();
+
+        apply_metadata(&mut status, "PEER_PUBLIC\ttest-peer\n");
 
         assert_eq!(status.public_key.as_deref(), Some("SERVER_PUBLIC"));
         assert_eq!(status.listen_port, Some(51820));
         assert_eq!(status.peers.len(), 1);
-        assert_eq!(status.peers[0].public_key, "PEER_PUBLIC");
-        assert_eq!(status.peers[0].allowed_ips, "10.0.0.2/32");
+        assert_eq!(status.peers[0].name.as_deref(), Some("test-peer"));
+        assert_eq!(status.peers[0].vpn_ip.as_deref(), Some("10.0.0.2"));
 
         let json = serde_json::to_string(&status).unwrap();
 

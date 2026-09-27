@@ -20,14 +20,21 @@ async fn main() {
         wireguard: ProviderConfig {
             label: "WireGuard".to_string(),
             command: env::var("VPN_UI_WG_COMMAND").unwrap_or_else(|_| "wg".to_string()),
+            metadata_command: env::var("VPN_UI_WG_METADATA_COMMAND")
+                .unwrap_or_else(|_| "vpn-ui-wg-meta".to_string()),
             interface: env::var("VPN_UI_WG_INTERFACE").unwrap_or_else(|_| "wg0".to_string()),
         },
 
         amneziawg: ProviderConfig {
             label: "AmneziaWG".to_string(),
             command: env::var("VPN_UI_AWG_COMMAND").unwrap_or_else(|_| "awg".to_string()),
+            metadata_command: env::var("VPN_UI_AWG_METADATA_COMMAND")
+                .unwrap_or_else(|_| "vpn-ui-awg-meta".to_string()),
             interface: env::var("VPN_UI_AWG_INTERFACE").unwrap_or_else(|_| "awg0".to_string()),
         },
+
+        ping_command: env::var("VPN_UI_PING_COMMAND")
+            .unwrap_or_else(|_| "/usr/bin/ping".to_string()),
     };
 
     let app = web::router(state).layer(TraceLayer::new_for_http());

@@ -1,20 +1,21 @@
 use crate::vpn::{
     amneziawg,
-    common::{InterfaceStatus, PeerStatus, ProviderConfig, now_epoch},
+    common::{InterfaceStatus, PeerStatus, PingResult, ProviderConfig, now_epoch, ping_ip},
     wireguard,
 };
 use axum::{
     Json, Router,
     extract::State,
     response::{Html, IntoResponse},
-    routing::get,
+    routing::{get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct AppState {
     pub wireguard: ProviderConfig,
     pub amneziawg: ProviderConfig,
+    pub ping_command: String,
 }
 
 #[derive(Serialize)]
@@ -24,6 +25,11 @@ struct Health {
     version: &'static str,
 }
 
+#[derive(Deserialize)]
+struct PingRequest {
+    public_key: String,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard))
@@ -31,6 +37,8 @@ pub fn router(state: AppState) -> Router {
         .route("/amneziawg", get(amneziawg_page))
         .route("/api/wireguard/status", get(wireguard_api))
         .route("/api/amneziawg/status", get(amneziawg_api))
+        .route("/api/wireguard/ping", post(wireguard_ping))
+        .route("/api/amneziawg/ping", post(amneziawg_ping))
         .route("/healthz", get(health))
         .with_state(state)
 }
@@ -71,12 +79,12 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn wireguard_page(State(state): State<AppState>) -> impl IntoResponse {
     let status = wireguard::status(&state.wireguard).await;
-    Html(layout("WireGuard", &provider_page(&status)))
+    Html(layout("WireGuard", &provider_page("wireguard", &status)))
 }
 
 async fn amneziawg_page(State(state): State<AppState>) -> impl IntoResponse {
     let status = amneziawg::status(&state.amneziawg).await;
-    Html(layout("AmneziaWG", &provider_page(&status)))
+    Html(layout("AmneziaWG", &provider_page("amneziawg", &status)))
 }
 
 async fn wireguard_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
@@ -85,6 +93,54 @@ async fn wireguard_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
 
 async fn amneziawg_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
     Json(amneziawg::status(&state.amneziawg).await)
+}
+
+async fn wireguard_ping(
+    State(state): State<AppState>,
+    Json(request): Json<PingRequest>,
+) -> Json<PingResult> {
+    let status = wireguard::status(&state.wireguard).await;
+    Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
+}
+
+async fn amneziawg_ping(
+    State(state): State<AppState>,
+    Json(request): Json<PingRequest>,
+) -> Json<PingResult> {
+    let status = amneziawg::status(&state.amneziawg).await;
+    Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
+}
+
+async fn ping_known_peer(
+    ping_command: &str,
+    status: &InterfaceStatus,
+    public_key: &str,
+) -> PingResult {
+    let Some(peer) = status
+        .peers
+        .iter()
+        .find(|peer| peer.public_key == public_key)
+    else {
+        return PingResult {
+            ok: false,
+            ip: String::new(),
+            avg_ms: None,
+            received: 0,
+            error: Some("peer not found".to_string()),
+        };
+    };
+
+    let Some(ip) = peer.vpn_ip.as_deref() else {
+        return PingResult {
+            ok: false,
+            ip: String::new(),
+            avg_ms: None,
+            received: 0,
+            error: Some("peer has no valid VPN IP".to_string()),
+        };
+    };
+
+    ping_ip(ping_command, ip).await
 }
 
 fn dashboard_card(path: &str, status: &InterfaceStatus) -> String {
@@ -107,7 +163,6 @@ fn dashboard_card(path: &str, status: &InterfaceStatus) -> String {
     <h2>{provider}</h2>
     <span class="badge {state_class}">{state_text}</span>
   </div>
-
   <div class="value">{interface}</div>
   <div class="muted">{port}</div>
   <div class="metric">{peers} пиров</div>
@@ -119,7 +174,7 @@ fn dashboard_card(path: &str, status: &InterfaceStatus) -> String {
     )
 }
 
-fn provider_page(status: &InterfaceStatus) -> String {
+fn provider_page(provider_id: &str, status: &InterfaceStatus) -> String {
     let error = status
         .error
         .as_ref()
@@ -150,11 +205,30 @@ fn provider_page(status: &InterfaceStatus) -> String {
 
     format!(
         r#"
+<script>
+window.VPN_UI_PROVIDER = "{provider_id}";
+</script>
+
 <div class="page-head">
   <div>
     <h1>{provider}</h1>
     <p class="lead">Интерфейс {interface}</p>
   </div>
+
+  <div class="toolbar">
+    <button id="refresh-button" class="button" type="button">↻ Обновить</button>
+
+    <label class="auto-refresh">
+      <input id="auto-refresh" type="checkbox" checked>
+      Автообновление
+    </label>
+
+    <span id="last-updated" class="muted">—</span>
+  </div>
+</div>
+
+<div id="structure-warning" class="alert warning hidden">
+  Состав пиров изменился. Обновите страницу вручную.
 </div>
 
 {error}
@@ -166,7 +240,7 @@ fn provider_page(status: &InterfaceStatus) -> String {
   </div>
   <div>
     <span>UDP порт</span>
-    <strong>{port}</strong>
+    <strong id="summary-port">{port}</strong>
   </div>
   <div>
     <span>Public key</span>
@@ -174,7 +248,7 @@ fn provider_page(status: &InterfaceStatus) -> String {
   </div>
   <div>
     <span>Пиры</span>
-    <strong>{peer_count}</strong>
+    <strong id="summary-peers">{peer_count}</strong>
   </div>
 </div>
 
@@ -183,6 +257,7 @@ fn provider_page(status: &InterfaceStatus) -> String {
   {peers}
 </div>
 "#,
+        provider_id = provider_id,
         provider = escape_html(&status.provider),
         interface = escape_html(&status.interface),
         peer_count = status.peers.len(),
@@ -195,20 +270,37 @@ fn peer_table(peers: &[PeerStatus]) -> String {
     for peer in peers {
         let (status_class, status_text) = handshake_status(peer.latest_handshake);
 
+        let name = peer.name.as_deref().unwrap_or("—");
+        let vpn_ip = peer.vpn_ip.as_deref().unwrap_or("—");
+
         rows.push_str(&format!(
             r#"
-<tr>
-  <td><span class="badge {status_class}">{status_text}</span></td>
-  <td class="mono">{key}</td>
-  <td class="mono">{allowed}</td>
-  <td class="mono">{endpoint}</td>
-  <td>{handshake}</td>
-  <td>{rx}</td>
-  <td>{tx}</td>
+<tr data-peer-key="{full_key}">
+  <td class="status-cell">
+    <span class="badge {status_class}">{status_text}</span>
+  </td>
+
+  <td>
+    <strong class="peer-name">{name}</strong>
+    <div class="peer-key mono">{short_key}</div>
+  </td>
+
+  <td class="peer-ip mono">{vpn_ip}</td>
+  <td class="peer-endpoint mono">{endpoint}</td>
+  <td class="peer-handshake">{handshake}</td>
+  <td class="peer-rx">{rx}</td>
+  <td class="peer-tx">{tx}</td>
+
+  <td class="ping-cell">
+    <span class="ping-result">—</span>
+    <button class="button small ping-button" type="button">Ping</button>
+  </td>
 </tr>
 "#,
-            key = escape_html(&short_key(&peer.public_key)),
-            allowed = escape_html(&peer.allowed_ips),
+            full_key = escape_html(&peer.public_key),
+            name = escape_html(name),
+            short_key = escape_html(&short_key(&peer.public_key)),
+            vpn_ip = escape_html(vpn_ip),
             endpoint = escape_html(peer.endpoint.as_deref().unwrap_or("—")),
             handshake = format_handshake(peer.latest_handshake),
             rx = format_bytes(peer.rx_bytes),
@@ -223,12 +315,13 @@ fn peer_table(peers: &[PeerStatus]) -> String {
 <thead>
 <tr>
   <th>Статус</th>
-  <th>Public key</th>
-  <th>VPN IP / AllowedIPs</th>
+  <th>Имя</th>
+  <th>VPN IP</th>
   <th>Endpoint</th>
   <th>Handshake</th>
   <th>RX</th>
   <th>TX</th>
+  <th>Ping</th>
 </tr>
 </thead>
 <tbody>
@@ -390,6 +483,48 @@ h2 { margin-top: 0; }
   margin-bottom: 30px;
 }
 
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  flex-wrap: wrap;
+}
+
+.auto-refresh {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 11px;
+  cursor: pointer;
+}
+
+.button:hover {
+  border-color: var(--accent);
+}
+
+.button:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.button.small {
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit,minmax(300px,1fr));
@@ -494,6 +629,14 @@ h2 { margin-top: 0; }
   color: #f0a2a7;
 }
 
+.alert.warning {
+  border: 1px solid #64552e;
+  background: #282414;
+  color: #e4c873;
+}
+
+.hidden { display: none; }
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -521,6 +664,26 @@ td { font-size: 14px; }
 
 tbody tr:hover { background: var(--panel2); }
 
+.peer-name {
+  display: block;
+}
+
+.peer-key {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.ping-cell {
+  min-width: 140px;
+}
+
+.ping-result {
+  display: inline-block;
+  min-width: 60px;
+  margin-right: 5px;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -540,12 +703,269 @@ tbody tr:hover { background: var(--panel2); }
 
   main { padding: 22px; }
 
+  .page-head { display: block; }
+
+  .toolbar {
+    margin-bottom: 20px;
+  }
+
   .summary { grid-template-columns: 1fr 1fr; }
 
   .summary div {
     border-bottom: 1px solid var(--border);
   }
 }
+"#;
+
+const SCRIPT: &str = r#"
+(() => {
+  const provider = window.VPN_UI_PROVIDER;
+
+  if (!provider) {
+    return;
+  }
+
+  const statusUrl = `/api/${provider}/status`;
+  const pingUrl = `/api/${provider}/ping`;
+
+  const refreshButton = document.getElementById("refresh-button");
+  const autoRefresh = document.getElementById("auto-refresh");
+  const lastUpdated = document.getElementById("last-updated");
+  const structureWarning = document.getElementById("structure-warning");
+
+  let timer = null;
+  let refreshing = false;
+
+  function formatBytes(value) {
+    const kib = 1024;
+    const mib = kib * 1024;
+    const gib = mib * 1024;
+
+    if (value >= gib) return `${(value / gib).toFixed(2)} GiB`;
+    if (value >= mib) return `${(value / mib).toFixed(2)} MiB`;
+    if (value >= kib) return `${(value / kib).toFixed(2)} KiB`;
+    return `${value} B`;
+  }
+
+  function handshakeInfo(timestamp) {
+    if (!timestamp) {
+      return {
+        cls: "never",
+        text: "NEVER",
+        age: "никогда"
+      };
+    }
+
+    const age = Math.max(
+      0,
+      Math.floor(Date.now() / 1000) - timestamp
+    );
+
+    let state;
+
+    if (age <= 180) {
+      state = { cls: "ok", text: "ONLINE" };
+    } else if (age <= 86400) {
+      state = { cls: "recent", text: "RECENT" };
+    } else {
+      state = { cls: "offline", text: "OFFLINE" };
+    }
+
+    let text;
+
+    if (age < 60) {
+      text = `${age} сек назад`;
+    } else if (age < 3600) {
+      text = `${Math.floor(age / 60)} мин назад`;
+    } else if (age < 86400) {
+      text =
+        `${Math.floor(age / 3600)} ч ` +
+        `${Math.floor((age % 3600) / 60)} мин назад`;
+    } else {
+      text =
+        `${Math.floor(age / 86400)} д ` +
+        `${Math.floor((age % 86400) / 3600)} ч назад`;
+    }
+
+    return {
+      ...state,
+      age: text
+    };
+  }
+
+  function updateRow(row, peer) {
+    const status = handshakeInfo(peer.latest_handshake);
+
+    const badge = row.querySelector(".status-cell .badge");
+    badge.className = `badge ${status.cls}`;
+    badge.textContent = status.text;
+
+    row.querySelector(".peer-name").textContent =
+      peer.name || "—";
+
+    row.querySelector(".peer-ip").textContent =
+      peer.vpn_ip || "—";
+
+    row.querySelector(".peer-endpoint").textContent =
+      peer.endpoint || "—";
+
+    row.querySelector(".peer-handshake").textContent =
+      status.age;
+
+    row.querySelector(".peer-rx").textContent =
+      formatBytes(peer.rx_bytes);
+
+    row.querySelector(".peer-tx").textContent =
+      formatBytes(peer.tx_bytes);
+  }
+
+  async function refreshStatus() {
+    if (refreshing) return;
+
+    refreshing = true;
+
+    if (refreshButton) {
+      refreshButton.disabled = true;
+      refreshButton.textContent = "↻ ...";
+    }
+
+    try {
+      const response = await fetch(statusUrl, {
+        cache: "no-store"
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      const rows = Array.from(
+        document.querySelectorAll("tr[data-peer-key]")
+      );
+
+      const peers = new Map(
+        data.peers.map(peer => [peer.public_key, peer])
+      );
+
+      for (const row of rows) {
+        const peer = peers.get(row.dataset.peerKey);
+
+        if (peer) {
+          updateRow(row, peer);
+        }
+      }
+
+      document.getElementById("summary-peers").textContent =
+        data.peers.length;
+
+      document.getElementById("summary-port").textContent =
+        data.listen_port ?? "—";
+
+      if (rows.length !== data.peers.length) {
+        structureWarning.classList.remove("hidden");
+      } else {
+        structureWarning.classList.add("hidden");
+      }
+
+      lastUpdated.textContent =
+        "Обновлено " + new Date().toLocaleTimeString();
+
+    } catch (error) {
+      lastUpdated.textContent =
+        "Ошибка обновления: " + error.message;
+
+    } finally {
+      refreshing = false;
+
+      if (refreshButton) {
+        refreshButton.disabled = false;
+        refreshButton.textContent = "↻ Обновить";
+      }
+    }
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(timer);
+
+    if (!autoRefresh.checked) {
+      return;
+    }
+
+    const delay = document.hidden ? 30000 : 5000;
+
+    timer = setTimeout(async () => {
+      await refreshStatus();
+      scheduleRefresh();
+    }, delay);
+  }
+
+  refreshButton?.addEventListener("click", async () => {
+    await refreshStatus();
+    scheduleRefresh();
+  });
+
+  autoRefresh?.addEventListener("change", () => {
+    scheduleRefresh();
+  });
+
+  document.addEventListener("visibilitychange", async () => {
+    if (!document.hidden && autoRefresh.checked) {
+      await refreshStatus();
+    }
+
+    scheduleRefresh();
+  });
+
+  document.addEventListener("click", async event => {
+    const button = event.target.closest(".ping-button");
+
+    if (!button) return;
+
+    const row = button.closest("tr[data-peer-key]");
+    const resultNode = row.querySelector(".ping-result");
+
+    button.disabled = true;
+    resultNode.textContent = "...";
+
+    try {
+      const response = await fetch(pingUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          public_key: row.dataset.peerKey
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      if (result.ok && result.avg_ms !== null) {
+        resultNode.textContent =
+          `${result.avg_ms.toFixed(1)} ms`;
+      } else {
+        resultNode.textContent =
+          result.error || "timeout";
+      }
+
+    } catch (error) {
+      resultNode.textContent = "ошибка";
+
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  lastUpdated.textContent =
+    "Обновлено " + new Date().toLocaleTimeString();
+
+  scheduleRefresh();
+})();
 "#;
 
 fn layout(title: &str, body: &str) -> String {
@@ -568,9 +988,11 @@ fn layout(title: &str, body: &str) -> String {
 </nav>
 <main>{body}</main>
 </div>
+<script>{script}</script>
 </body>
 </html>"#,
         title = escape_html(title),
         style = STYLE,
+        script = SCRIPT,
     )
 }
