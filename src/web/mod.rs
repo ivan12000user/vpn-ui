@@ -217,6 +217,7 @@ window.VPN_UI_PROVIDER = "{provider_id}";
 
   <div class="toolbar">
     <button id="refresh-button" class="button" type="button">↻ Обновить</button>
+    <button id="ping-all-button" class="button" type="button">Проверить все</button>
 
     <label class="auto-refresh">
       <input id="auto-refresh" type="checkbox" checked>
@@ -335,7 +336,7 @@ fn peer_table(peers: &[PeerStatus]) -> String {
 
 fn handshake_status(timestamp: Option<u64>) -> (&'static str, &'static str) {
     let Some(timestamp) = timestamp else {
-        return ("never", "NEVER");
+        return ("never", "NO DATA");
     };
 
     let age = now_epoch().saturating_sub(timestamp);
@@ -729,6 +730,7 @@ const SCRIPT: &str = r#"
   const pingUrl = `/api/${provider}/ping`;
 
   const refreshButton = document.getElementById("refresh-button");
+  const pingAllButton = document.getElementById("ping-all-button");
   const autoRefresh = document.getElementById("auto-refresh");
   const lastUpdated = document.getElementById("last-updated");
   const structureWarning = document.getElementById("structure-warning");
@@ -751,7 +753,7 @@ const SCRIPT: &str = r#"
     if (!timestamp) {
       return {
         cls: "never",
-        text: "NEVER",
+        text: "NO DATA",
         age: "никогда"
       };
     }
@@ -791,6 +793,60 @@ const SCRIPT: &str = r#"
       ...state,
       age: text
     };
+  }
+
+  function statusRank(timestamp) {
+    if (!timestamp) return 3;
+
+    const age = Math.max(
+      0,
+      Math.floor(Date.now() / 1000) - timestamp
+    );
+
+    if (age <= 180) return 0;
+    if (age <= 86400) return 1;
+    return 2;
+  }
+
+  function sortRows(peers) {
+    const tbody = document.querySelector("tbody");
+
+    if (!tbody) return;
+
+    const peerMap = new Map(
+      peers.map(peer => [peer.public_key, peer])
+    );
+
+    const rows = Array.from(
+      tbody.querySelectorAll("tr[data-peer-key]")
+    );
+
+    rows.sort((a, b) => {
+      const pa = peerMap.get(a.dataset.peerKey);
+      const pb = peerMap.get(b.dataset.peerKey);
+
+      if (!pa || !pb) return 0;
+
+      const rankDiff =
+        statusRank(pa.latest_handshake) -
+        statusRank(pb.latest_handshake);
+
+      if (rankDiff !== 0) {
+        return rankDiff;
+      }
+
+      const nameA =
+        (pa.name || pa.vpn_ip || "").toLocaleLowerCase();
+
+      const nameB =
+        (pb.name || pb.vpn_ip || "").toLocaleLowerCase();
+
+      return nameA.localeCompare(nameB, "ru");
+    });
+
+    for (const row of rows) {
+      tbody.appendChild(row);
+    }
   }
 
   function updateRow(row, peer) {
@@ -856,6 +912,8 @@ const SCRIPT: &str = r#"
         }
       }
 
+      sortRows(data.peers);
+
       document.getElementById("summary-peers").textContent =
         data.peers.length;
 
@@ -917,13 +975,11 @@ const SCRIPT: &str = r#"
     scheduleRefresh();
   });
 
-  document.addEventListener("click", async event => {
-    const button = event.target.closest(".ping-button");
-
-    if (!button) return;
-
-    const row = button.closest("tr[data-peer-key]");
+  async function pingRow(row) {
+    const button = row.querySelector(".ping-button");
     const resultNode = row.querySelector(".ping-result");
+
+    if (!button || !resultNode) return;
 
     button.disabled = true;
     resultNode.textContent = "...";
@@ -958,6 +1014,39 @@ const SCRIPT: &str = r#"
 
     } finally {
       button.disabled = false;
+    }
+  }
+
+  document.addEventListener("click", async event => {
+    const button = event.target.closest(".ping-button");
+
+    if (!button) return;
+
+    const row = button.closest("tr[data-peer-key]");
+
+    await pingRow(row);
+  });
+
+  pingAllButton?.addEventListener("click", async () => {
+    const rows = Array.from(
+      document.querySelectorAll("tr[data-peer-key]")
+    );
+
+    pingAllButton.disabled = true;
+    pingAllButton.textContent = "Проверка...";
+
+    try {
+      // Максимум 4 ICMP-проверки одновременно.
+      for (let i = 0; i < rows.length; i += 4) {
+        const batch = rows.slice(i, i + 4);
+
+        await Promise.all(
+          batch.map(row => pingRow(row))
+        );
+      }
+    } finally {
+      pingAllButton.disabled = false;
+      pingAllButton.textContent = "Проверить все";
     }
   });
 
