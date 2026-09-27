@@ -1,7 +1,10 @@
-use crate::vpn::{
-    amneziawg,
-    common::{InterfaceStatus, PeerStatus, PingResult, ProviderConfig, now_epoch, ping_ip},
-    wireguard,
+use crate::{
+    geoip::{GeoIpService, enrich_status},
+    vpn::{
+        amneziawg,
+        common::{InterfaceStatus, PeerStatus, PingResult, ProviderConfig, now_epoch, ping_ip},
+        wireguard,
+    },
 };
 use axum::{
     Json, Router,
@@ -16,6 +19,7 @@ pub struct AppState {
     pub wireguard: ProviderConfig,
     pub amneziawg: ProviderConfig,
     pub ping_command: String,
+    pub geoip: GeoIpService,
 }
 
 #[derive(Serialize)]
@@ -78,21 +82,27 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn wireguard_page(State(state): State<AppState>) -> impl IntoResponse {
-    let status = wireguard::status(&state.wireguard).await;
+    let mut status = wireguard::status(&state.wireguard).await;
+    enrich_status(&state.geoip, &mut status).await;
     Html(layout("WireGuard", &provider_page("wireguard", &status)))
 }
 
 async fn amneziawg_page(State(state): State<AppState>) -> impl IntoResponse {
-    let status = amneziawg::status(&state.amneziawg).await;
+    let mut status = amneziawg::status(&state.amneziawg).await;
+    enrich_status(&state.geoip, &mut status).await;
     Html(layout("AmneziaWG", &provider_page("amneziawg", &status)))
 }
 
 async fn wireguard_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
-    Json(wireguard::status(&state.wireguard).await)
+    let mut status = wireguard::status(&state.wireguard).await;
+    enrich_status(&state.geoip, &mut status).await;
+    Json(status)
 }
 
 async fn amneziawg_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
-    Json(amneziawg::status(&state.amneziawg).await)
+    let mut status = amneziawg::status(&state.amneziawg).await;
+    enrich_status(&state.geoip, &mut status).await;
+    Json(status)
 }
 
 async fn wireguard_ping(
@@ -191,11 +201,11 @@ fn provider_page(provider_id: &str, status: &InterfaceStatus) -> String {
         .map(|v| v.to_string())
         .unwrap_or_else(|| "—".to_string());
 
-    let public_key = status
-        .public_key
-        .as_deref()
-        .map(short_key)
-        .unwrap_or_else(|| "—".to_string());
+    let online_count = status
+        .peers
+        .iter()
+        .filter(|peer| handshake_status(peer.latest_handshake).0 == "ok")
+        .count();
 
     let peers = if status.peers.is_empty() {
         r#"<div class="empty">Пиры не найдены.</div>"#.to_string()
@@ -218,6 +228,13 @@ window.VPN_UI_PROVIDER = "{provider_id}";
   <div class="toolbar">
     <button id="refresh-button" class="button" type="button">↻ Обновить</button>
     <button id="ping-all-button" class="button" type="button">Проверить все</button>
+    <input
+      id="peer-filter"
+      class="filter-input"
+      type="search"
+      placeholder="Поиск..."
+      autocomplete="off"
+    >
 
     <label class="auto-refresh">
       <input id="auto-refresh" type="checkbox" checked>
@@ -244,12 +261,12 @@ window.VPN_UI_PROVIDER = "{provider_id}";
     <strong id="summary-port">{port}</strong>
   </div>
   <div>
-    <span>Public key</span>
-    <strong class="mono">{public_key}</strong>
-  </div>
-  <div>
     <span>Пиры</span>
     <strong id="summary-peers">{peer_count}</strong>
+  </div>
+  <div>
+    <span>ONLINE</span>
+    <strong id="summary-online">{online_count}</strong>
   </div>
 </div>
 
@@ -262,6 +279,7 @@ window.VPN_UI_PROVIDER = "{provider_id}";
         provider = escape_html(&status.provider),
         interface = escape_html(&status.interface),
         peer_count = status.peers.len(),
+        online_count = online_count,
     )
 }
 
@@ -283,11 +301,12 @@ fn peer_table(peers: &[PeerStatus]) -> String {
 
   <td>
     <strong class="peer-name">{name}</strong>
-    <div class="peer-key mono">{short_key}</div>
   </td>
 
   <td class="peer-ip mono">{vpn_ip}</td>
   <td class="peer-endpoint mono">{endpoint}</td>
+  <td class="peer-provider">{provider}</td>
+  <td class="peer-location">{location}</td>
   <td class="peer-handshake">{handshake}</td>
   <td class="peer-rx">{rx}</td>
   <td class="peer-tx">{tx}</td>
@@ -300,9 +319,10 @@ fn peer_table(peers: &[PeerStatus]) -> String {
 "#,
             full_key = escape_html(&peer.public_key),
             name = escape_html(name),
-            short_key = escape_html(&short_key(&peer.public_key)),
             vpn_ip = escape_html(vpn_ip),
             endpoint = escape_html(peer.endpoint.as_deref().unwrap_or("—")),
+            provider = escape_html(peer.geo_provider.as_deref().unwrap_or("—")),
+            location = escape_html(peer.geo_location.as_deref().unwrap_or("—")),
             handshake = format_handshake(peer.latest_handshake),
             rx = format_bytes(peer.rx_bytes),
             tx = format_bytes(peer.tx_bytes),
@@ -319,6 +339,8 @@ fn peer_table(peers: &[PeerStatus]) -> String {
   <th>Имя</th>
   <th>VPN IP</th>
   <th>Endpoint</th>
+  <th>Провайдер / ASN</th>
+  <th>Местоположение</th>
   <th>Handshake</th>
   <th>RX</th>
   <th>TX</th>
@@ -384,24 +406,6 @@ fn format_bytes(value: u64) -> String {
     } else {
         format!("{value} B")
     }
-}
-
-fn short_key(value: &str) -> String {
-    if value.chars().count() <= 18 {
-        return value.to_string();
-    }
-
-    let start: String = value.chars().take(10).collect();
-    let end: String = value
-        .chars()
-        .rev()
-        .take(6)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-
-    format!("{start}…{end}")
 }
 
 fn escape_html(value: &str) -> String {
@@ -669,12 +673,6 @@ tbody tr:hover { background: var(--panel2); }
   display: block;
 }
 
-.peer-key {
-  color: var(--muted);
-  font-size: 11px;
-  margin-top: 4px;
-}
-
 .ping-cell {
   min-width: 140px;
 }
@@ -683,6 +681,28 @@ tbody tr:hover { background: var(--panel2); }
   display: inline-block;
   min-width: 60px;
   margin-right: 5px;
+}
+
+.ping-result.ok {
+  color: var(--green);
+}
+
+.ping-result.error {
+  color: var(--red);
+}
+
+.filter-input {
+  width: 180px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.filter-input:focus {
+  border-color: var(--accent);
 }
 
 .mono {
@@ -731,12 +751,20 @@ const SCRIPT: &str = r#"
 
   const refreshButton = document.getElementById("refresh-button");
   const pingAllButton = document.getElementById("ping-all-button");
+  const peerFilter = document.getElementById("peer-filter");
   const autoRefresh = document.getElementById("auto-refresh");
   const lastUpdated = document.getElementById("last-updated");
   const structureWarning = document.getElementById("structure-warning");
 
   let timer = null;
   let refreshing = false;
+
+  const savedAutoRefresh =
+    localStorage.getItem("vpn-ui-auto-refresh");
+
+  if (savedAutoRefresh !== null) {
+    autoRefresh.checked = savedAutoRefresh === "1";
+  }
 
   function formatBytes(value) {
     const kib = 1024;
@@ -849,6 +877,31 @@ const SCRIPT: &str = r#"
     }
   }
 
+  function applyFilter() {
+    if (!peerFilter) return;
+
+    const query = peerFilter.value
+      .trim()
+      .toLocaleLowerCase("ru");
+
+    for (const row of document.querySelectorAll(
+      "tr[data-peer-key]"
+    )) {
+      const text = [
+        row.querySelector(".peer-name")?.textContent,
+        row.querySelector(".peer-ip")?.textContent,
+        row.querySelector(".peer-endpoint")?.textContent,
+        row.querySelector(".peer-provider")?.textContent,
+        row.querySelector(".peer-location")?.textContent
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLocaleLowerCase("ru");
+
+      row.hidden = query !== "" && !text.includes(query);
+    }
+  }
+
   function updateRow(row, peer) {
     const status = handshakeInfo(peer.latest_handshake);
 
@@ -864,6 +917,12 @@ const SCRIPT: &str = r#"
 
     row.querySelector(".peer-endpoint").textContent =
       peer.endpoint || "—";
+
+    row.querySelector(".peer-provider").textContent =
+      peer.geo_provider || "—";
+
+    row.querySelector(".peer-location").textContent =
+      peer.geo_location || "—";
 
     row.querySelector(".peer-handshake").textContent =
       status.age;
@@ -913,12 +972,18 @@ const SCRIPT: &str = r#"
       }
 
       sortRows(data.peers);
+      applyFilter();
 
       document.getElementById("summary-peers").textContent =
         data.peers.length;
 
       document.getElementById("summary-port").textContent =
         data.listen_port ?? "—";
+
+      document.getElementById("summary-online").textContent =
+        data.peers.filter(
+          peer => statusRank(peer.latest_handshake) === 0
+        ).length;
 
       if (rows.length !== data.peers.length) {
         structureWarning.classList.remove("hidden");
@@ -958,12 +1023,19 @@ const SCRIPT: &str = r#"
     }, delay);
   }
 
+  peerFilter?.addEventListener("input", applyFilter);
+
   refreshButton?.addEventListener("click", async () => {
     await refreshStatus();
     scheduleRefresh();
   });
 
   autoRefresh?.addEventListener("change", () => {
+    localStorage.setItem(
+      "vpn-ui-auto-refresh",
+      autoRefresh.checked ? "1" : "0"
+    );
+
     scheduleRefresh();
   });
 
@@ -983,6 +1055,7 @@ const SCRIPT: &str = r#"
 
     button.disabled = true;
     resultNode.textContent = "...";
+    resultNode.classList.remove("ok", "error");
 
     try {
       const response = await fetch(pingUrl, {
@@ -1004,9 +1077,11 @@ const SCRIPT: &str = r#"
       if (result.ok && result.avg_ms !== null) {
         resultNode.textContent =
           `${result.avg_ms.toFixed(1)} ms`;
+        resultNode.classList.add("ok");
       } else {
         resultNode.textContent =
           result.error || "timeout";
+        resultNode.classList.add("error");
       }
 
     } catch (error) {
@@ -1037,12 +1112,19 @@ const SCRIPT: &str = r#"
 
     try {
       // Максимум 4 ICMP-проверки одновременно.
+      let completed = 0;
+
       for (let i = 0; i < rows.length; i += 4) {
         const batch = rows.slice(i, i + 4);
 
         await Promise.all(
           batch.map(row => pingRow(row))
         );
+
+        completed += batch.length;
+
+        pingAllButton.textContent =
+          `Проверка ${completed}/${rows.length}`;
       }
     } finally {
       pingAllButton.disabled = false;

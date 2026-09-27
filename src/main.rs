@@ -1,6 +1,8 @@
+mod geoip;
 mod vpn;
 mod web;
 
+use crate::geoip::GeoIpService;
 use crate::vpn::common::ProviderConfig;
 use crate::web::AppState;
 use std::{env, net::SocketAddr};
@@ -15,6 +17,13 @@ async fn main() {
                 .unwrap_or_else(|_| "vpn_ui=info,tower_http=info".into()),
         )
         .init();
+
+    let geoip = GeoIpService::new(
+        env::var("VPN_UI_GEOIP_CACHE")
+            .unwrap_or_else(|_| "/var/lib/vpn-ui/geoip-cache.json".to_string()),
+        7 * 24 * 60 * 60,
+    )
+    .await;
 
     let state = AppState {
         wireguard: ProviderConfig {
@@ -35,6 +44,7 @@ async fn main() {
 
         ping_command: env::var("VPN_UI_PING_COMMAND")
             .unwrap_or_else(|_| "/usr/bin/ping".to_string()),
+        geoip,
     };
 
     let app = web::router(state).layer(TraceLayer::new_for_http());

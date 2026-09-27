@@ -26,6 +26,8 @@ pub struct PeerStatus {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub persistent_keepalive: Option<u16>,
+    pub geo_provider: Option<String>,
+    pub geo_location: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -118,7 +120,52 @@ pub async fn query_provider(config: &ProviderConfig) -> InterfaceStatus {
         }
     }
 
+    sort_peers(&mut status.peers);
+
     status
+}
+
+fn sort_peers(peers: &mut [PeerStatus]) {
+    let now = now_epoch();
+
+    peers.sort_by(|a, b| {
+        let rank_a = status_rank(a.latest_handshake, now);
+        let rank_b = status_rank(b.latest_handshake, now);
+
+        rank_a.cmp(&rank_b).then_with(|| {
+            let a_name = a
+                .name
+                .as_deref()
+                .or(a.vpn_ip.as_deref())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let b_name = b
+                .name
+                .as_deref()
+                .or(b.vpn_ip.as_deref())
+                .unwrap_or("")
+                .to_lowercase();
+
+            a_name.cmp(&b_name)
+        })
+    });
+}
+
+fn status_rank(timestamp: Option<u64>, now: u64) -> u8 {
+    let Some(timestamp) = timestamp else {
+        return 3;
+    };
+
+    let age = now.saturating_sub(timestamp);
+
+    if age <= 180 {
+        0
+    } else if age <= 86_400 {
+        1
+    } else {
+        2
+    }
 }
 
 fn parse_dump(provider: &str, interface: &str, dump: &str) -> Result<InterfaceStatus, String> {
@@ -183,6 +230,8 @@ fn parse_dump(provider: &str, interface: &str, dump: &str) -> Result<InterfaceSt
                 .get(7)
                 .and_then(|v| v.parse::<u16>().ok())
                 .filter(|v| *v > 0),
+            geo_provider: None,
+            geo_location: None,
         });
     }
 
