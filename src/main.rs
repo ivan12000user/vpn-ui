@@ -1,5 +1,6 @@
 mod admin;
 mod geoip;
+mod settings_manage;
 mod vpn;
 mod web;
 
@@ -67,7 +68,9 @@ async fn main() {
         geoip,
     };
 
-    let app = web::router(state).layer(TraceLayer::new_for_http());
+    let app = web::router(state.clone())
+        .merge(settings_manage::router(state))
+        .layer(TraceLayer::new_for_http());
 
     let listen = env::var("VPN_UI_LISTEN").unwrap_or_else(|_| "127.0.0.1:8090".to_string());
 
