@@ -247,8 +247,8 @@ fn string_value(value: &Value, key: &str) -> String {
 }
 
 async fn helper_request(command: &str, request: Value) -> Result<Value, String> {
-    let request_bytes = serde_json::to_vec(&request)
-        .map_err(|err| format!("cannot encode request: {err}"))?;
+    let request_bytes =
+        serde_json::to_vec(&request).map_err(|err| format!("cannot encode request: {err}"))?;
 
     let mut child = Command::new(command)
         .stdin(Stdio::piped())
