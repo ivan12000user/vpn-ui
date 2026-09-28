@@ -4,6 +4,7 @@ use crate::{
 };
 
 use axum::{
+    Json,
     extract::{Query, State},
     http::{
         HeaderValue, StatusCode,
@@ -14,6 +15,7 @@ use axum::{
 
 use qrcodegen::{QrCode, QrCodeEcc};
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 use std::process::Stdio;
 
@@ -324,6 +326,121 @@ async fn load_client_config(state: &AppState, provider: &str, key: &str) -> Resu
     }
 
     Ok(config)
+}
+
+pub async fn wireguard_manage(
+    State(state): State<AppState>,
+    Json(request): Json<Value>,
+) -> Response {
+    manage_request(&state.wg_manage_command, request).await
+}
+
+pub async fn amneziawg_manage(
+    State(state): State<AppState>,
+    Json(request): Json<Value>,
+) -> Response {
+    manage_request(&state.awg_manage_command, request).await
+}
+
+async fn manage_request(command: &str, request: Value) -> Response {
+    let request_bytes = match serde_json::to_vec(&request) {
+        Ok(value) => value,
+
+        Err(err) => {
+            return manage_error(
+                StatusCode::BAD_REQUEST,
+                &format!("cannot encode request: {err}"),
+            );
+        }
+    };
+
+    let mut child = match Command::new(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+
+        Err(err) => {
+            return manage_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("cannot execute {command}: {err}"),
+            );
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(err) = stdin.write_all(&request_bytes).await {
+            return manage_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("cannot write request: {err}"),
+            );
+        }
+
+        if let Err(err) = stdin.write_all(b"\n").await {
+            return manage_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("cannot finish request: {err}"),
+            );
+        }
+    }
+
+    let output = match child.wait_with_output().await {
+        Ok(output) => output,
+
+        Err(err) => {
+            return manage_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("cannot read result: {err}"),
+            );
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        let message = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("{command} returned {}", output.status)
+        };
+
+        return manage_error(StatusCode::BAD_REQUEST, &message);
+    }
+
+    let result: Value = match serde_json::from_slice(&output.stdout) {
+        Ok(value) => value,
+
+        Err(err) => {
+            return manage_error(
+                StatusCode::BAD_GATEWAY,
+                &format!(
+                    "management helper returned \
+invalid JSON: {err}"
+                ),
+            );
+        }
+    };
+
+    no_store(Json(result).into_response())
+}
+
+fn manage_error(status: StatusCode, message: &str) -> Response {
+    no_store(
+        (
+            status,
+            Json(json!({
+                "ok": false,
+                "error": message,
+            })),
+        )
+            .into_response(),
+    )
 }
 
 fn valid_public_key(value: &str) -> bool {

@@ -27,6 +27,9 @@ pub struct AppState {
     pub wg_client_config_command: String,
     pub awg_client_config_command: String,
 
+    pub wg_manage_command: String,
+    pub awg_manage_command: String,
+
     pub geoip: GeoIpService,
 }
 
@@ -58,6 +61,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/admin/client-config",
             get(crate::admin::client_config_download),
+        )
+        .route(
+            "/api/admin/wireguard/manage",
+            post(crate::admin::wireguard_manage),
+        )
+        .route(
+            "/api/admin/amneziawg/manage",
+            post(crate::admin::amneziawg_manage),
         )
         .route("/api/wireguard/status", get(wireguard_api))
         .route("/api/amneziawg/status", get(amneziawg_api))

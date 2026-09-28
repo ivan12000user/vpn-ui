@@ -58,6 +58,12 @@ async fn main() {
         awg_client_config_command: env::var("VPN_UI_AWG_CLIENT_CONFIG_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg-client-config".to_string()),
 
+        wg_manage_command: env::var("VPN_UI_WG_MANAGE_COMMAND")
+            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-manage-wg".to_string()),
+
+        awg_manage_command: env::var("VPN_UI_AWG_MANAGE_COMMAND")
+            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-manage-awg".to_string()),
+
         geoip,
     };
 
