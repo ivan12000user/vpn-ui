@@ -57,6 +57,7 @@ pub fn router(state: AppState) -> Router {
         .route("/wireguard", get(wireguard_page))
         .route("/amneziawg", get(amneziawg_page))
         .route("/settings", get(settings_page))
+        .route("/api/admin/auth", get(admin_auth))
         .route("/admin/client", get(crate::admin::client_page))
         .route(
             "/api/admin/client-config",
@@ -86,6 +87,21 @@ async fn health() -> Json<Health> {
         application: "vpn-ui",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+async fn admin_auth() -> impl IntoResponse {
+    Html(layout(
+        "Управление",
+        r#"
+<div class="panel">
+  <h1>Управление VPN</h1>
+  <p class="lead">
+    Авторизация подтверждена.
+    Это окно можно закрыть и вернуться к списку пиров.
+  </p>
+</div>
+"#,
+    ))
 }
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
@@ -597,6 +613,20 @@ window.VPN_UI_PROVIDER = "{provider_id}";
   </div>
 
   <div class="toolbar">
+    <a
+      id="admin-auth-button"
+      class="button"
+      href="/api/admin/auth"
+      target="_blank"
+      rel="noopener"
+    >🔐 Управление</a>
+
+    <button
+      id="create-peer-button"
+      class="button primary"
+      type="button"
+    >+ Создать пир</button>
+
     <button id="refresh-button" class="button" type="button">↻ Обновить</button>
     <button id="ping-all-button" class="button" type="button">Проверить все</button>
     <input
@@ -645,6 +675,116 @@ window.VPN_UI_PROVIDER = "{provider_id}";
   <h2>Пиры</h2>
   {peers}
 </div>
+
+<div
+  id="peer-modal"
+  class="modal-backdrop hidden"
+  aria-hidden="true"
+>
+  <div
+    class="modal-card"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="peer-modal-title"
+  >
+    <div class="modal-head">
+      <h2 id="peer-modal-title">Пир</h2>
+
+      <button
+        id="peer-modal-close"
+        class="button small"
+        type="button"
+        aria-label="Закрыть"
+      >✕</button>
+    </div>
+
+    <form id="peer-form">
+      <input
+        id="peer-form-mode"
+        type="hidden"
+        value="create"
+      >
+
+      <input
+        id="peer-public-key"
+        type="hidden"
+      >
+
+      <div class="peer-form-grid">
+        <label>
+          <span>Имя</span>
+          <input
+            id="peer-name"
+            type="text"
+            autocomplete="off"
+            required
+          >
+        </label>
+
+        <label>
+          <span>VPN IP</span>
+          <input
+            id="peer-vpn-ip"
+            class="mono"
+            type="text"
+            autocomplete="off"
+            required
+          >
+        </label>
+
+        <label class="wide">
+          <span>Client AllowedIPs</span>
+          <textarea
+            id="peer-client-allowed"
+            class="mono"
+            rows="3"
+            required
+          ></textarea>
+        </label>
+
+        <label class="wide">
+          <span>Доп. Server AllowedIPs</span>
+          <textarea
+            id="peer-server-allowed"
+            class="mono"
+            rows="3"
+            placeholder="Можно оставить пустым"
+          ></textarea>
+        </label>
+
+        <label>
+          <span>PersistentKeepalive</span>
+          <input
+            id="peer-keepalive"
+            class="mono"
+            type="text"
+            autocomplete="off"
+            placeholder="пусто или число"
+          >
+        </label>
+      </div>
+
+      <div
+        id="peer-form-error"
+        class="alert error hidden"
+      ></div>
+
+      <div class="modal-actions">
+        <button
+          id="peer-form-cancel"
+          class="button"
+          type="button"
+        >Отмена</button>
+
+        <button
+          id="peer-form-save"
+          class="button primary"
+          type="submit"
+        >Сохранить</button>
+      </div>
+    </form>
+  </div>
+</div>
 "#,
         provider_id = provider_id,
         provider = escape_html(&status.provider),
@@ -687,19 +827,26 @@ fn peer_table(provider_id: &str, peers: &[PeerStatus]) -> String {
     <button class="button small ping-button" type="button">Ping</button>
   </td>
 
-  <td class="config-cell" data-label="Конфиг">
-    <form
-      class="config-form"
-      method="get"
-      action="/admin/client"
-      target="_blank"
-    >
-      <input type="hidden" name="provider" value="{provider_id}">
-      <input type="hidden" name="key" value="{full_key}">
-      <button class="button small config-button" type="submit">
-        Конфиг / QR
-      </button>
-    </form>
+  <td class="actions-cell" data-label="Действия">
+    <div class="peer-actions">
+      <form
+        class="config-form"
+        method="get"
+        action="/admin/client"
+        target="_blank"
+      >
+        <input type="hidden" name="provider" value="{provider_id}">
+        <input type="hidden" name="key" value="{full_key}">
+        <button class="button small config-button" type="submit">
+          Конфиг / QR
+        </button>
+      </form>
+
+      <button
+        class="button small edit-button"
+        type="button"
+      >Изменить</button>
+    </div>
   </td>
 </tr>
 "#,
@@ -731,7 +878,7 @@ fn peer_table(provider_id: &str, peers: &[PeerStatus]) -> String {
   <th>RX</th>
   <th>TX</th>
   <th>Ping</th>
-  <th>Конфиг</th>
+  <th>Действия</th>
 </tr>
 </thead>
 <tbody>
@@ -1284,6 +1431,124 @@ tbody tr.status-disabled .peer-name-cell {
   white-space: nowrap;
 }
 
+.button.primary {
+  border-color: var(--accent);
+}
+
+.actions-cell {
+  min-width: 200px;
+}
+
+.peer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+body.modal-open {
+  overflow: hidden;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, .66);
+}
+
+.modal-backdrop.hidden {
+  display: none;
+}
+
+.modal-card {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .4);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.modal-head h2 {
+  margin: 0;
+}
+
+.peer-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.peer-form-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.peer-form-grid label > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.peer-form-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.peer-form-grid input,
+.peer-form-grid textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: var(--panel2);
+  color: var(--text);
+  font: inherit;
+}
+
+.peer-form-grid textarea {
+  resize: vertical;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+@media (max-width: 640px) {
+  .peer-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .peer-form-grid .wide {
+    grid-column: auto;
+  }
+
+  .modal-backdrop {
+    padding: 8px;
+  }
+
+  .modal-card {
+    max-height: calc(100vh - 16px);
+    padding: 14px;
+  }
+}
+
 .filter-input {
   width: 180px;
   border: 1px solid var(--border);
@@ -1823,12 +2088,60 @@ const SCRIPT: &str = r#"
   const inventoryUrl =
     `/api/${provider}/inventory`;
 
+  const manageUrl =
+    `/api/admin/${provider}/manage`;
+
   const refreshButton = document.getElementById("refresh-button");
   const pingAllButton = document.getElementById("ping-all-button");
   const peerFilter = document.getElementById("peer-filter");
   const autoRefresh = document.getElementById("auto-refresh");
   const lastUpdated = document.getElementById("last-updated");
   const structureWarning = document.getElementById("structure-warning");
+
+  const createPeerButton =
+    document.getElementById("create-peer-button");
+
+  const peerModal =
+    document.getElementById("peer-modal");
+
+  const peerModalClose =
+    document.getElementById("peer-modal-close");
+
+  const peerModalTitle =
+    document.getElementById("peer-modal-title");
+
+  const peerForm =
+    document.getElementById("peer-form");
+
+  const peerFormMode =
+    document.getElementById("peer-form-mode");
+
+  const peerPublicKey =
+    document.getElementById("peer-public-key");
+
+  const peerName =
+    document.getElementById("peer-name");
+
+  const peerVpnIp =
+    document.getElementById("peer-vpn-ip");
+
+  const peerClientAllowed =
+    document.getElementById("peer-client-allowed");
+
+  const peerServerAllowed =
+    document.getElementById("peer-server-allowed");
+
+  const peerKeepalive =
+    document.getElementById("peer-keepalive");
+
+  const peerFormError =
+    document.getElementById("peer-form-error");
+
+  const peerFormCancel =
+    document.getElementById("peer-form-cancel");
+
+  const peerFormSave =
+    document.getElementById("peer-form-save");
 
   let timer = null;
   let refreshing = false;
@@ -1983,6 +2296,509 @@ const SCRIPT: &str = r#"
     }
   }
 
+  function networkListText(value) {
+    if (!Array.isArray(value)) {
+      return "";
+    }
+
+    return value.join("\n");
+  }
+
+  function parseNetworkList(value) {
+    return value
+      .split(/[\s,]+/)
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+
+  function setPeerFormError(message) {
+    if (!peerFormError) {
+      return;
+    }
+
+    const text =
+      String(message || "").trim();
+
+    peerFormError.textContent = text;
+
+    peerFormError.classList.toggle(
+      "hidden",
+      text === ""
+    );
+  }
+
+  function openPeerModal() {
+    if (!peerModal) {
+      return;
+    }
+
+    setPeerFormError("");
+
+    peerModal.classList.remove(
+      "hidden"
+    );
+
+    peerModal.setAttribute(
+      "aria-hidden",
+      "false"
+    );
+
+    document.body.classList.add(
+      "modal-open"
+    );
+  }
+
+  function closePeerModal() {
+    if (!peerModal) {
+      return;
+    }
+
+    peerModal.classList.add(
+      "hidden"
+    );
+
+    peerModal.setAttribute(
+      "aria-hidden",
+      "true"
+    );
+
+    document.body.classList.remove(
+      "modal-open"
+    );
+
+    setPeerFormError("");
+  }
+
+  async function adminRequest(request) {
+    const response = await fetch(
+      manageUrl,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type":
+            "application/json"
+        },
+        cache: "no-store",
+        credentials: "same-origin",
+        body: JSON.stringify(
+          request
+        )
+      }
+    );
+
+    let data = null;
+
+    try {
+      data =
+        await response.json();
+    } catch (_) {
+      data = null;
+    }
+
+    if (response.status === 401) {
+      throw new Error(
+        "Требуется авторизация. " +
+        "Нажмите «🔐 Управление», " +
+        "введите логин/пароль и повторите."
+      );
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error ||
+        `HTTP ${response.status}`
+      );
+    }
+
+    if (
+      !data ||
+      data.ok !== true
+    ) {
+      throw new Error(
+        data?.error ||
+        "Некорректный ответ управления"
+      );
+    }
+
+    return data;
+  }
+
+  function fillPeerForm(peer) {
+    peerName.value =
+      peer.name || "";
+
+    peerVpnIp.value =
+      peer.vpn_ip || "";
+
+    peerClientAllowed.value =
+      networkListText(
+        peer.client_allowed_ips
+      );
+
+    peerServerAllowed.value =
+      networkListText(
+        peer.extra_server_allowed_ips
+      );
+
+    peerKeepalive.value =
+      peer.persistent_keepalive ?? "";
+  }
+
+  async function openCreatePeer() {
+    if (!createPeerButton) {
+      return;
+    }
+
+    const oldText =
+      createPeerButton.textContent;
+
+    createPeerButton.disabled = true;
+
+    createPeerButton.textContent =
+      "Загрузка...";
+
+    try {
+      const data =
+        await adminRequest({
+          op: "defaults"
+        });
+
+      peerFormMode.value =
+        "create";
+
+      peerPublicKey.value =
+        "";
+
+      peerModalTitle.textContent =
+        provider === "wireguard"
+          ? "Создать пир WireGuard"
+          : "Создать пир AmneziaWG";
+
+      peerFormSave.textContent =
+        "Создать";
+
+      peerName.value =
+        "";
+
+      peerVpnIp.value =
+        data.vpn_ip || "";
+
+      peerClientAllowed.value =
+        networkListText(
+          data.client_allowed_ips
+        );
+
+      peerServerAllowed.value =
+        "";
+
+      peerKeepalive.value =
+        data.persistent_keepalive ?? "";
+
+      openPeerModal();
+
+      peerName.focus();
+    } catch (error) {
+      window.alert(
+        error?.message ||
+        String(error)
+      );
+    } finally {
+      createPeerButton.disabled =
+        false;
+
+      createPeerButton.textContent =
+        oldText;
+    }
+  }
+
+  async function openEditPeer(
+    row,
+    button
+  ) {
+    if (!row) {
+      return;
+    }
+
+    const publicKey =
+      row.dataset.peerKey;
+
+    if (!publicKey) {
+      return;
+    }
+
+    const oldText =
+      button?.textContent ||
+      "Изменить";
+
+    if (button) {
+      button.disabled = true;
+
+      button.textContent =
+        "Загрузка...";
+    }
+
+    try {
+      const data =
+        await adminRequest({
+          op: "get",
+          public_key: publicKey
+        });
+
+      if (!data.peer) {
+        throw new Error(
+          "Пир не найден в inventory"
+        );
+      }
+
+      peerFormMode.value =
+        "edit";
+
+      peerPublicKey.value =
+        publicKey;
+
+      peerModalTitle.textContent =
+        `Изменить: ${
+          data.peer.name ||
+          data.peer.vpn_ip ||
+          "пир"
+        }`;
+
+      peerFormSave.textContent =
+        "Сохранить";
+
+      fillPeerForm(
+        data.peer
+      );
+
+      openPeerModal();
+
+      peerName.focus();
+      peerName.select();
+    } catch (error) {
+      window.alert(
+        error?.message ||
+        String(error)
+      );
+    } finally {
+      if (button) {
+        button.disabled =
+          false;
+
+        button.textContent =
+          oldText;
+      }
+    }
+  }
+
+  async function savePeerForm(event) {
+    event.preventDefault();
+
+    const mode =
+      peerFormMode.value;
+
+    if (
+      mode !== "create" &&
+      mode !== "edit"
+    ) {
+      setPeerFormError(
+        "Некорректный режим формы."
+      );
+
+      return;
+    }
+
+    const name =
+      peerName.value.trim();
+
+    const vpnIp =
+      peerVpnIp.value.trim();
+
+    const clientAllowed =
+      parseNetworkList(
+        peerClientAllowed.value
+      );
+
+    const extraServerAllowed =
+      parseNetworkList(
+        peerServerAllowed.value
+      );
+
+    const keepalive =
+      peerKeepalive.value.trim();
+
+    if (!name) {
+      setPeerFormError(
+        "Укажите имя пира."
+      );
+
+      peerName.focus();
+      return;
+    }
+
+    if (!vpnIp) {
+      setPeerFormError(
+        "Укажите VPN IP."
+      );
+
+      peerVpnIp.focus();
+      return;
+    }
+
+    if (
+      clientAllowed.length === 0
+    ) {
+      setPeerFormError(
+        "Client AllowedIPs не может быть пустым."
+      );
+
+      peerClientAllowed.focus();
+      return;
+    }
+
+    const request = {
+      op: mode,
+      name,
+      vpn_ip: vpnIp,
+      client_allowed_ips:
+        clientAllowed,
+      extra_server_allowed_ips:
+        extraServerAllowed,
+      persistent_keepalive:
+        keepalive
+    };
+
+    if (mode === "edit") {
+      const publicKey =
+        peerPublicKey.value.trim();
+
+      if (!publicKey) {
+        setPeerFormError(
+          "Не найден public key пира."
+        );
+
+        return;
+      }
+
+      request.public_key =
+        publicKey;
+    }
+
+    const oldText =
+      peerFormSave.textContent;
+
+    peerFormSave.disabled =
+      true;
+
+    peerFormSave.textContent =
+      mode === "create"
+        ? "Создание..."
+        : "Сохранение...";
+
+    setPeerFormError("");
+
+    try {
+      await adminRequest(
+        request
+      );
+
+      closePeerModal();
+
+      await refreshStatus();
+    } catch (error) {
+      setPeerFormError(
+        error?.message ||
+        String(error)
+      );
+    } finally {
+      peerFormSave.disabled =
+        false;
+
+      peerFormSave.textContent =
+        oldText;
+    }
+  }
+
+  if (createPeerButton) {
+    createPeerButton.addEventListener(
+      "click",
+      openCreatePeer
+    );
+  }
+
+  if (peerForm) {
+    peerForm.addEventListener(
+      "submit",
+      savePeerForm
+    );
+  }
+
+  if (peerModalClose) {
+    peerModalClose.addEventListener(
+      "click",
+      closePeerModal
+    );
+  }
+
+  if (peerFormCancel) {
+    peerFormCancel.addEventListener(
+      "click",
+      closePeerModal
+    );
+  }
+
+  if (peerModal) {
+    peerModal.addEventListener(
+      "click",
+      event => {
+        if (
+          event.target ===
+          peerModal
+        ) {
+          closePeerModal();
+        }
+      }
+    );
+  }
+
+  document.addEventListener(
+    "keydown",
+    event => {
+      if (
+        event.key === "Escape" &&
+        peerModal &&
+        !peerModal.classList.contains(
+          "hidden"
+        )
+      ) {
+        closePeerModal();
+      }
+    }
+  );
+
+  document.addEventListener(
+    "click",
+    event => {
+      const button =
+        event.target.closest(
+          ".edit-button"
+        );
+
+      if (!button) {
+        return;
+      }
+
+      const row =
+        button.closest(
+          "tr[data-peer-key]"
+        );
+
+      openEditPeer(
+        row,
+        button
+      );
+    }
+  );
+
   function createPeerRow(publicKey) {
     const row = document.createElement("tr");
 
@@ -2011,20 +2827,27 @@ const SCRIPT: &str = r#"
   <button class="button small ping-button" type="button">Ping</button>
 </td>
 
-<td class="config-cell" data-label="Конфиг">
-  <form
-    class="config-form"
-    method="get"
-    action="/admin/client"
-    target="_blank"
-  >
-    <input type="hidden" name="provider">
-    <input type="hidden" name="key">
+<td class="actions-cell" data-label="Действия">
+  <div class="peer-actions">
+    <form
+      class="config-form"
+      method="get"
+      action="/admin/client"
+      target="_blank"
+    >
+      <input type="hidden" name="provider">
+      <input type="hidden" name="key">
 
-    <button class="button small config-button" type="submit">
-      Конфиг / QR
-    </button>
-  </form>
+      <button class="button small config-button" type="submit">
+        Конфиг / QR
+      </button>
+    </form>
+
+    <button
+      class="button small edit-button"
+      type="button"
+    >Изменить</button>
+  </div>
 </td>
 `;
 
