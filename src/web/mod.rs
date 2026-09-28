@@ -846,6 +846,17 @@ fn peer_table(provider_id: &str, peers: &[PeerStatus]) -> String {
         class="button small edit-button"
         type="button"
       >Изменить</button>
+
+      <button
+        class="button small toggle-peer-button"
+        type="button"
+        disabled
+      >…</button>
+
+      <button
+        class="button small danger delete-button"
+        type="button"
+      >Удалить</button>
     </div>
   </td>
 </tr>
@@ -1435,6 +1446,12 @@ tbody tr.status-disabled .peer-name-cell {
   border-color: var(--accent);
 }
 
+.button.danger {
+  color: var(--danger, #d9534f);
+  border-color: var(--danger, #d9534f);
+  font-weight: 700;
+}
+
 .actions-cell {
   min-width: 200px;
 }
@@ -1573,11 +1590,129 @@ body.modal-open {
 }
 
 /*
- * 1400px и ниже:
- * обычная 10-колоночная таблица превращается в карточки.
- * Sidebar пока остаётся desktop.
+ * 901–1600px:
+ * компактная строковая таблица для ноутбуков и HiDPI-дисплеев.
+ * Действия укладываются сеткой 2x2, без горизонтальной прокрутки.
  */
-@media (max-width: 1400px) {
+@media (min-width: 901px) and (max-width: 1600px) {
+  .layout {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+
+  nav {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  main {
+    padding: 22px;
+  }
+
+  .page-head {
+    gap: 12px;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+
+  .table-wrap {
+    overflow: visible;
+  }
+
+  table {
+    width: 100%;
+  }
+
+  th,
+  td {
+    padding: 8px 5px;
+  }
+
+  th {
+    font-size: 11px;
+  }
+
+  td {
+    font-size: 12px;
+  }
+
+  .peer-name-cell {
+    min-width: 90px;
+    white-space: normal;
+  }
+
+  .peer-name {
+    overflow-wrap: anywhere;
+  }
+
+  .peer-endpoint {
+    font-size: 11px;
+  }
+
+  .peer-provider,
+  .peer-location {
+    min-width: 95px;
+    max-width: 150px;
+    font-size: 11px;
+    line-height: 1.25;
+  }
+
+  .peer-handshake {
+    white-space: normal;
+    min-width: 78px;
+  }
+
+  .peer-rx,
+  .peer-tx {
+    font-size: 11px;
+  }
+
+  .ping-cell {
+    min-width: 82px;
+  }
+
+  .ping-result {
+    min-width: 32px;
+    margin-right: 2px;
+  }
+
+  .actions-cell {
+    min-width: 148px;
+    width: 148px;
+  }
+
+  .peer-actions {
+    display: grid;
+    grid-template-columns:
+      repeat(2, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .peer-actions .config-form {
+    min-width: 0;
+  }
+
+  .peer-actions .button.small {
+    width: 100%;
+    min-width: 0;
+    min-height: 28px;
+    padding: 4px 5px;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+
+  .peer-actions .config-button {
+    width: 100%;
+  }
+}
+
+
+/*
+ * 900px и ниже:
+ * таблица пиров превращается в карточки.
+ */
+@media (max-width: 900px) {
   main {
     padding: 26px;
   }
@@ -2799,6 +2934,209 @@ const SCRIPT: &str = r#"
     }
   );
 
+  document.addEventListener(
+    "click",
+    event => {
+      const button =
+        event.target.closest(
+          ".toggle-peer-button"
+        );
+
+      if (!button) {
+        return;
+      }
+
+      const row =
+        button.closest(
+          "tr[data-peer-key]"
+        );
+
+      togglePeer(
+        row,
+        button
+      );
+    }
+  );
+
+  async function togglePeer(
+    row,
+    button
+  ) {
+    if (!row || !button) {
+      return;
+    }
+
+    const publicKey =
+      row.dataset.peerKey;
+
+    if (!publicKey) {
+      return;
+    }
+
+    const operation =
+      button.dataset.operation;
+
+    if (
+      operation !== "enable" &&
+      operation !== "disable"
+    ) {
+      window.alert(
+        "Состояние пира ещё не загружено."
+      );
+
+      return;
+    }
+
+    const oldText =
+      button.textContent;
+
+    button.disabled = true;
+
+    button.textContent =
+      operation === "disable"
+        ? "Отключение..."
+        : "Включение...";
+
+    try {
+      await adminRequest({
+        op: operation,
+        public_key: publicKey
+      });
+
+      await refreshStatus();
+    } catch (error) {
+      button.textContent =
+        oldText;
+
+      window.alert(
+        error?.message ||
+        String(error)
+      );
+    } finally {
+      if (button.isConnected) {
+        button.disabled = false;
+      }
+    }
+  }
+
+  document.addEventListener(
+    "click",
+    event => {
+      const button =
+        event.target.closest(
+          ".delete-button"
+        );
+
+      if (!button) {
+        return;
+      }
+
+      const row =
+        button.closest(
+          "tr[data-peer-key]"
+        );
+
+      deletePeer(
+        row,
+        button
+      );
+    }
+  );
+
+  async function deletePeer(
+    row,
+    button
+  ) {
+    if (!row || !button) {
+      return;
+    }
+
+    const publicKey =
+      row.dataset.peerKey;
+
+    if (!publicKey) {
+      return;
+    }
+
+    const oldText =
+      button.textContent;
+
+    button.disabled = true;
+
+    button.textContent =
+      "Проверка...";
+
+    try {
+      const data =
+        await adminRequest({
+          op: "get",
+          public_key: publicKey
+        });
+
+      const peer =
+        data.peer;
+
+      if (!peer) {
+        throw new Error(
+          "Пир не найден в inventory."
+        );
+      }
+
+      const name =
+        String(
+          peer.name || ""
+        ).trim();
+
+      const vpnIp =
+        String(
+          peer.vpn_ip || ""
+        ).trim();
+
+      if (!name || !vpnIp) {
+        throw new Error(
+          "У пира отсутствует имя или VPN IP."
+        );
+      }
+
+      const confirmed =
+        window.confirm(
+          "Удалить пир?\n\n" +
+          `Имя: ${name}\n` +
+          `VPN IP: ${vpnIp}\n\n` +
+          "Пир будет удалён из inventory, " +
+          "конфигурации и live-состояния."
+        );
+
+      if (!confirmed) {
+        return;
+      }
+
+      button.textContent =
+        "Удаление...";
+
+      await adminRequest({
+        op: "delete",
+        public_key: publicKey,
+        confirm_name: name,
+        confirm_vpn_ip: vpnIp
+      });
+
+      await refreshStatus();
+    } catch (error) {
+      window.alert(
+        error?.message ||
+        String(error)
+      );
+    } finally {
+      if (button.isConnected) {
+        button.disabled = false;
+
+        button.textContent =
+          oldText;
+      }
+    }
+  }
+
   function createPeerRow(publicKey) {
     const row = document.createElement("tr");
 
@@ -2847,6 +3185,17 @@ const SCRIPT: &str = r#"
       class="button small edit-button"
       type="button"
     >Изменить</button>
+
+    <button
+      class="button small toggle-peer-button"
+      type="button"
+      disabled
+    >…</button>
+
+    <button
+      class="button small danger delete-button"
+      type="button"
+    >Удалить</button>
   </div>
 </td>
 `;
@@ -3124,6 +3473,30 @@ const SCRIPT: &str = r#"
         "ok",
         "error"
       );
+    }
+
+    row.dataset.peerEnabled =
+      disabled
+        ? "false"
+        : "true";
+
+    const toggleButton =
+      row.querySelector(
+        ".toggle-peer-button"
+      );
+
+    if (toggleButton) {
+      toggleButton.dataset.operation =
+        disabled
+          ? "enable"
+          : "disable";
+
+      toggleButton.textContent =
+        disabled
+          ? "Включить"
+          : "Отключить";
+
+      toggleButton.disabled = false;
     }
   }
 
