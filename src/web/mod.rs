@@ -450,7 +450,7 @@ window.VPN_UI_PROVIDER = "{provider_id}";
 </div>
 
 <div id="structure-warning" class="alert warning hidden">
-  Состав пиров изменился. Обновите страницу вручную.
+  Обнаружено рассогласование inventory и live-состояния.
 </div>
 
 {error}
@@ -498,7 +498,7 @@ fn peer_table(provider_id: &str, peers: &[PeerStatus]) -> String {
 
         rows.push_str(&format!(
             r#"
-<tr data-peer-key="{full_key}">
+<tr class="status-{status_class}" data-peer-key="{full_key}">
   <td class="status-cell" aria-hidden="true">
     <span class="badge {status_class}">{status_text}</span>
   </td>
@@ -1036,35 +1036,44 @@ td { font-size: 14px; }
  * Статус пира показывается самой строкой.
  * Скрытый badge остаётся внутренним источником статуса для JS.
  */
-tbody tr:has(.badge.ok) td {
+tbody tr.status-ok td {
   background: rgba(91, 197, 139, .055);
 }
 
-tbody tr:has(.badge.recent) td {
+tbody tr.status-recent td {
   background: rgba(217, 182, 94, .055);
 }
 
-tbody tr:has(.badge.offline) td {
+tbody tr.status-offline td {
   background: rgba(227, 108, 116, .055);
 }
 
-tbody tr:has(.badge.never) td {
+tbody tr.status-never td {
   background: rgba(148, 163, 179, .025);
 }
 
-tbody tr:has(.badge.ok) .peer-name-cell {
+tbody tr.status-disabled td {
+  background: rgba(148, 163, 179, .045);
+  opacity: .72;
+}
+
+tbody tr.status-ok .peer-name-cell {
   box-shadow: inset 4px 0 0 var(--green);
 }
 
-tbody tr:has(.badge.recent) .peer-name-cell {
+tbody tr.status-recent .peer-name-cell {
   box-shadow: inset 4px 0 0 var(--yellow);
 }
 
-tbody tr:has(.badge.offline) .peer-name-cell {
+tbody tr.status-offline .peer-name-cell {
   box-shadow: inset 4px 0 0 var(--red);
 }
 
-tbody tr:has(.badge.never) .peer-name-cell {
+tbody tr.status-never .peer-name-cell {
+  box-shadow: inset 4px 0 0 var(--muted);
+}
+
+tbody tr.status-disabled .peer-name-cell {
   box-shadow: inset 4px 0 0 var(--muted);
 }
 
@@ -1183,24 +1192,30 @@ tbody tr:has(.badge.never) .peer-name-cell {
     border-radius: 10px;
   }
 
-  tbody tr[data-peer-key]:has(.badge.ok) {
+  tbody tr[data-peer-key].status-ok {
     background: rgba(91, 197, 139, .055);
     border-left-color: var(--green);
   }
 
-  tbody tr[data-peer-key]:has(.badge.recent) {
+  tbody tr[data-peer-key].status-recent {
     background: rgba(217, 182, 94, .055);
     border-left-color: var(--yellow);
   }
 
-  tbody tr[data-peer-key]:has(.badge.offline) {
+  tbody tr[data-peer-key].status-offline {
     background: rgba(227, 108, 116, .055);
     border-left-color: var(--red);
   }
 
-  tbody tr[data-peer-key]:has(.badge.never) {
+  tbody tr[data-peer-key].status-never {
     background: var(--panel2);
     border-left-color: var(--muted);
+  }
+
+  tbody tr[data-peer-key].status-disabled {
+    background: var(--panel2);
+    border-left-color: var(--muted);
+    opacity: .76;
   }
 
   tbody tr[data-peer-key] td {
@@ -1638,6 +1653,11 @@ const SCRIPT: &str = r#"
   const statusUrl = `/api/${provider}/status`;
   const pingUrl = `/api/${provider}/ping`;
 
+  const manageUrl =
+    provider === "wireguard"
+      ? "/api/admin/wireguard/manage"
+      : "/api/admin/amneziawg/manage";
+
   const refreshButton = document.getElementById("refresh-button");
   const pingAllButton = document.getElementById("ping-all-button");
   const peerFilter = document.getElementById("peer-filter");
@@ -1712,7 +1732,14 @@ const SCRIPT: &str = r#"
     };
   }
 
-  function statusRank(timestamp) {
+  function statusRank(peer) {
+    if (peer?.enabled === false) {
+      return 4;
+    }
+
+    const timestamp =
+      peer?.latest_handshake;
+
     if (!timestamp) return 3;
 
     const age = Math.max(
@@ -1745,8 +1772,8 @@ const SCRIPT: &str = r#"
       if (!pa || !pb) return 0;
 
       const rankDiff =
-        statusRank(pa.latest_handshake) -
-        statusRank(pb.latest_handshake);
+        statusRank(pa) -
+        statusRank(pb);
 
       if (rankDiff !== 0) {
         return rankDiff;
@@ -1791,8 +1818,266 @@ const SCRIPT: &str = r#"
     }
   }
 
+  function createPeerRow(publicKey) {
+    const row = document.createElement("tr");
+
+    row.dataset.peerKey = publicKey;
+    row.classList.add("status-never");
+
+    row.innerHTML = `
+<td class="status-cell" aria-hidden="true">
+  <span class="badge never">NO DATA</span>
+</td>
+
+<td class="peer-name-cell" data-label="Имя">
+  <strong class="peer-name">—</strong>
+</td>
+
+<td class="peer-ip mono" data-label="VPN IP">—</td>
+<td class="peer-endpoint mono" data-label="Endpoint">—</td>
+<td class="peer-provider" data-label="Провайдер / ASN">—</td>
+<td class="peer-location" data-label="Местоположение">—</td>
+<td class="peer-handshake" data-label="Handshake">никогда</td>
+<td class="peer-rx" data-label="RX">0 B</td>
+<td class="peer-tx" data-label="TX">0 B</td>
+
+<td class="ping-cell" data-label="Ping">
+  <span class="ping-result">—</span>
+  <button class="button small ping-button" type="button">Ping</button>
+</td>
+
+<td class="config-cell" data-label="Конфиг">
+  <form
+    class="config-form"
+    method="get"
+    action="/admin/client"
+    target="_blank"
+  >
+    <input type="hidden" name="provider">
+    <input type="hidden" name="key">
+
+    <button class="button small config-button" type="submit">
+      Конфиг / QR
+    </button>
+  </form>
+</td>
+`;
+
+    const providerInput =
+      row.querySelector(
+        'input[name="provider"]'
+      );
+
+    const keyInput =
+      row.querySelector(
+        'input[name="key"]'
+      );
+
+    if (providerInput) {
+      providerInput.value = provider;
+    }
+
+    if (keyInput) {
+      keyInput.value = publicKey;
+    }
+
+    return row;
+  }
+
+  function reconcileRows(inventoryPeers) {
+    const tbody = document.querySelector("tbody");
+
+    if (!tbody) {
+      return [];
+    }
+
+    const wantedKeys = new Set(
+      inventoryPeers.map(
+        peer => peer.public_key
+      )
+    );
+
+    for (const row of Array.from(
+      tbody.querySelectorAll(
+        "tr[data-peer-key]"
+      )
+    )) {
+      if (
+        !wantedKeys.has(
+          row.dataset.peerKey
+        )
+      ) {
+        row.remove();
+      }
+    }
+
+    const rows = new Map(
+      Array.from(
+        tbody.querySelectorAll(
+          "tr[data-peer-key]"
+        )
+      ).map(row => [
+        row.dataset.peerKey,
+        row
+      ])
+    );
+
+    for (const peer of inventoryPeers) {
+      if (!rows.has(peer.public_key)) {
+        const row =
+          createPeerRow(
+            peer.public_key
+          );
+
+        tbody.appendChild(row);
+
+        rows.set(
+          peer.public_key,
+          row
+        );
+      }
+    }
+
+    return inventoryPeers
+      .map(
+        peer =>
+          rows.get(peer.public_key)
+      )
+      .filter(Boolean);
+  }
+
+  function mergeInventoryAndLive(
+    inventoryPeers,
+    livePeers
+  ) {
+    const liveMap = new Map(
+      livePeers.map(peer => [
+        peer.public_key,
+        peer
+      ])
+    );
+
+    return inventoryPeers.map(
+      item => {
+        const live =
+          liveMap.get(
+            item.public_key
+          );
+
+        return {
+          ...(live || {}),
+
+          public_key:
+            item.public_key,
+
+          name:
+            item.name ||
+            live?.name ||
+            null,
+
+          vpn_ip:
+            item.vpn_ip ||
+            live?.vpn_ip ||
+            null,
+
+          enabled:
+            item.enabled !== false,
+
+          endpoint:
+            live?.endpoint ?? null,
+
+          geo_provider:
+            live?.geo_provider ?? null,
+
+          geo_location:
+            live?.geo_location ?? null,
+
+          latest_handshake:
+            live?.latest_handshake ?? null,
+
+          rx_bytes:
+            live?.rx_bytes ?? 0,
+
+          tx_bytes:
+            live?.tx_bytes ?? 0
+        };
+      }
+    );
+  }
+
+  function inventoryHasDrift(
+    inventoryPeers,
+    livePeers
+  ) {
+    const inventoryMap =
+      new Map(
+        inventoryPeers.map(
+          peer => [
+            peer.public_key,
+            peer
+          ]
+        )
+      );
+
+    const liveKeys =
+      new Set(
+        livePeers.map(
+          peer => peer.public_key
+        )
+      );
+
+    for (const peer of livePeers) {
+      if (
+        !inventoryMap.has(
+          peer.public_key
+        )
+      ) {
+        return true;
+      }
+    }
+
+    for (const peer of inventoryPeers) {
+      if (
+        peer.enabled !== false &&
+        !liveKeys.has(
+          peer.public_key
+        )
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   function updateRow(row, peer) {
-    const status = handshakeInfo(peer.latest_handshake);
+    const disabled =
+      peer.enabled === false;
+
+    const status = disabled
+      ? {
+          cls: "disabled",
+          text: "DISABLED",
+          age: "отключён"
+        }
+      : handshakeInfo(
+          peer.latest_handshake
+        );
+
+    row.dataset.peerEnabled =
+      disabled ? "false" : "true";
+
+    row.classList.remove(
+      "status-ok",
+      "status-recent",
+      "status-offline",
+      "status-never",
+      "status-disabled"
+    );
+
+    row.classList.add(
+      `status-${status.cls}`
+    );
 
     const badge = row.querySelector(".status-cell .badge");
     badge.className = `badge ${status.cls}`;
@@ -1817,10 +2102,41 @@ const SCRIPT: &str = r#"
       status.age;
 
     row.querySelector(".peer-rx").textContent =
-      formatBytes(peer.rx_bytes);
+      disabled
+        ? "—"
+        : formatBytes(
+            peer.rx_bytes ?? 0
+          );
 
     row.querySelector(".peer-tx").textContent =
-      formatBytes(peer.tx_bytes);
+      disabled
+        ? "—"
+        : formatBytes(
+            peer.tx_bytes ?? 0
+          );
+
+    const pingButton =
+      row.querySelector(".ping-button");
+
+    const pingResult =
+      row.querySelector(".ping-result");
+
+    if (pingButton) {
+      pingButton.disabled =
+        disabled;
+    }
+
+    if (
+      disabled &&
+      pingResult
+    ) {
+      pingResult.textContent = "—";
+
+      pingResult.classList.remove(
+        "ok",
+        "error"
+      );
+    }
   }
 
   async function refreshStatus() {
@@ -1830,84 +2146,211 @@ const SCRIPT: &str = r#"
 
     if (refreshButton) {
       refreshButton.disabled = true;
-      refreshButton.textContent = "↻ ...";
+      refreshButton.textContent =
+        "↻ ...";
     }
 
     try {
-      const response = await fetch(statusUrl, {
-        cache: "no-store"
-      });
+      const [
+        statusResponse,
+        inventoryResponse
+      ] = await Promise.all([
+        fetch(
+          statusUrl,
+          {
+            cache: "no-store"
+          }
+        ),
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        fetch(
+          manageUrl,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json"
+            },
+            cache: "no-store",
+            body: JSON.stringify({
+              op: "list"
+            })
+          }
+        )
+      ]);
+
+      if (!statusResponse.ok) {
+        throw new Error(
+          `status HTTP ${statusResponse.status}`
+        );
       }
 
-      const data = await response.json();
+      if (!inventoryResponse.ok) {
+        throw new Error(
+          `inventory HTTP ${inventoryResponse.status}`
+        );
+      }
 
-      const rows = Array.from(
-        document.querySelectorAll("tr[data-peer-key]")
-      );
+      const statusData =
+        await statusResponse.json();
 
-      const peers = new Map(
-        data.peers.map(peer => [peer.public_key, peer])
-      );
+      const inventoryData =
+        await inventoryResponse.json();
+
+      if (
+        inventoryData.ok !== true ||
+        !Array.isArray(
+          inventoryData.peers
+        )
+      ) {
+        throw new Error(
+          inventoryData.error ||
+          "invalid inventory response"
+        );
+      }
+
+      if (
+        !Array.isArray(
+          statusData.peers
+        )
+      ) {
+        throw new Error(
+          "invalid status response"
+        );
+      }
+
+      const mergedPeers =
+        mergeInventoryAndLive(
+          inventoryData.peers,
+          statusData.peers
+        );
+
+      const rows =
+        reconcileRows(
+          inventoryData.peers
+        );
+
+      const peerMap =
+        new Map(
+          mergedPeers.map(
+            peer => [
+              peer.public_key,
+              peer
+            ]
+          )
+        );
 
       for (const row of rows) {
-        const peer = peers.get(row.dataset.peerKey);
+        const peer =
+          peerMap.get(
+            row.dataset.peerKey
+          );
 
         if (peer) {
-          updateRow(row, peer);
+          updateRow(
+            row,
+            peer
+          );
         }
       }
 
-      sortRows(data.peers);
+      sortRows(mergedPeers);
       applyFilter();
 
-      document.getElementById("summary-peers").textContent =
-        data.peers.length;
+      document
+        .getElementById(
+          "summary-peers"
+        )
+        .textContent =
+          inventoryData.peers.length;
 
-      document.getElementById("summary-port").textContent =
-        data.listen_port ?? "—";
+      document
+        .getElementById(
+          "summary-port"
+        )
+        .textContent =
+          statusData.listen_port ??
+          "—";
 
-      document.getElementById("summary-online").textContent =
-        data.peers.filter(
-          peer => statusRank(peer.latest_handshake) === 0
-        ).length;
+      document
+        .getElementById(
+          "summary-online"
+        )
+        .textContent =
+          mergedPeers.filter(
+            peer =>
+              peer.enabled !== false &&
+              statusRank(
+                peer
+              ) === 0
+          ).length;
 
-      if (rows.length !== data.peers.length) {
-        structureWarning.classList.remove("hidden");
+      const drift =
+        inventoryHasDrift(
+          inventoryData.peers,
+          statusData.peers
+        );
+
+      if (drift) {
+        structureWarning
+          ?.classList
+          .remove("hidden");
       } else {
-        structureWarning.classList.add("hidden");
+        structureWarning
+          ?.classList
+          .add("hidden");
       }
 
       lastUpdated.textContent =
-        "Обновлено " + new Date().toLocaleTimeString();
+        "Обновлено " +
+        new Date()
+          .toLocaleTimeString();
 
       lastUpdated.title = "";
-      lastUpdated.classList.remove("refresh-error");
+
+      lastUpdated
+        .classList
+        .remove(
+          "refresh-error"
+        );
 
     } catch (error) {
-      const retrySeconds = document.hidden ? 60 : 15;
+      const retrySeconds =
+        document.hidden
+          ? 60
+          : 15;
 
-      if (autoRefresh?.checked) {
+      if (
+        autoRefresh?.checked
+      ) {
         lastUpdated.textContent =
           `Нет связи · повтор через ${retrySeconds} с`;
       } else {
-        lastUpdated.textContent = "Нет связи";
+        lastUpdated.textContent =
+          "Нет связи";
       }
 
       lastUpdated.title =
         "Ошибка обновления: " +
-        (error?.message || String(error));
+        (
+          error?.message ||
+          String(error)
+        );
 
-      lastUpdated.classList.add("refresh-error");
+      lastUpdated
+        .classList
+        .add(
+          "refresh-error"
+        );
 
     } finally {
       refreshing = false;
 
       if (refreshButton) {
-        refreshButton.disabled = false;
-        refreshButton.textContent = "↻ Обновить";
+        refreshButton.disabled =
+          false;
+
+        refreshButton.textContent =
+          "↻ Обновить";
       }
     }
   }
@@ -1956,6 +2399,20 @@ const SCRIPT: &str = r#"
     const resultNode = row.querySelector(".ping-result");
 
     if (!button || !resultNode) return;
+
+    if (
+      row?.dataset.peerEnabled === "false"
+    ) {
+      resultNode.textContent =
+        "отключён";
+
+      resultNode.classList.remove(
+        "ok",
+        "error"
+      );
+
+      return;
+    }
 
     button.disabled = true;
     resultNode.textContent = "...";
@@ -2009,6 +2466,9 @@ const SCRIPT: &str = r#"
   pingAllButton?.addEventListener("click", async () => {
     const rows = Array.from(
       document.querySelectorAll("tr[data-peer-key]")
+    ).filter(
+      row =>
+        row.dataset.peerEnabled !== "false"
     );
 
     pingAllButton.disabled = true;
@@ -2037,9 +2497,11 @@ const SCRIPT: &str = r#"
   });
 
   lastUpdated.textContent =
-    "Обновлено " + new Date().toLocaleTimeString();
+    "Синхронизация...";
 
-  scheduleRefresh();
+  refreshStatus().finally(() => {
+    scheduleRefresh();
+  });
 })();
 "#;
 
