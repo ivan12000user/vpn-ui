@@ -70,6 +70,8 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/amneziawg/manage",
             post(crate::admin::amneziawg_manage),
         )
+        .route("/api/wireguard/inventory", get(wireguard_inventory))
+        .route("/api/amneziawg/inventory", get(amneziawg_inventory))
         .route("/api/wireguard/status", get(wireguard_api))
         .route("/api/amneziawg/status", get(amneziawg_api))
         .route("/api/wireguard/ping", post(wireguard_ping))
@@ -122,6 +124,171 @@ async fn amneziawg_page(State(state): State<AppState>) -> impl IntoResponse {
     let mut status = amneziawg::status(&state.amneziawg).await;
     enrich_status(&state.geoip, &mut status).await;
     Html(layout("AmneziaWG", &provider_page("amneziawg", &status)))
+}
+
+async fn wireguard_inventory(State(state): State<AppState>) -> impl IntoResponse {
+    inventory_api(&state.wg_manage_command).await
+}
+
+async fn amneziawg_inventory(State(state): State<AppState>) -> impl IntoResponse {
+    inventory_api(&state.awg_manage_command).await
+}
+
+async fn inventory_api(command: &str) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    let mut child = match Command::new(command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+
+        Err(err) => {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "error":
+                        format!(
+                            "cannot execute inventory helper: {err}"
+                        ),
+                })),
+            );
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(err) =
+            tokio::io::AsyncWriteExt::write_all(&mut stdin, b"{\"op\":\"list\"}\n").await
+        {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "error":
+                        format!(
+                            "cannot request inventory: {err}"
+                        ),
+                })),
+            );
+        }
+    }
+
+    let output = match child.wait_with_output().await {
+        Ok(output) => output,
+
+        Err(err) => {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "error":
+                        format!(
+                            "cannot read inventory: {err}"
+                        ),
+                })),
+            );
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error":
+                    if stderr.is_empty() {
+                        "inventory helper failed"
+                            .to_string()
+                    } else {
+                        stderr
+                    },
+            })),
+        );
+    }
+
+    let result: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(value) => value,
+
+        Err(err) => {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "error":
+                        format!(
+                            "invalid inventory JSON: {err}"
+                        ),
+                })),
+            );
+        }
+    };
+
+    if result.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error":
+                    "inventory helper returned failure",
+            })),
+        );
+    }
+
+    let Some(peers) = result.get("peers").and_then(serde_json::Value::as_array) else {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "error":
+                    "inventory response has no peers array",
+            })),
+        );
+    };
+
+    let mut public_peers = Vec::with_capacity(peers.len());
+
+    for peer in peers {
+        let Some(public_key) = peer.get("public_key").and_then(serde_json::Value::as_str) else {
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "error":
+                        "inventory peer has no public_key",
+                })),
+            );
+        };
+
+        let name = peer.get("name").and_then(serde_json::Value::as_str);
+
+        let vpn_ip = peer.get("vpn_ip").and_then(serde_json::Value::as_str);
+
+        let enabled = peer
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+
+        public_peers.push(serde_json::json!({
+            "public_key": public_key,
+            "name": name,
+            "vpn_ip": vpn_ip,
+            "enabled": enabled,
+        }));
+    }
+
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "ok": true,
+            "count":
+                public_peers.len(),
+            "peers":
+                public_peers,
+        })),
+    )
 }
 
 async fn wireguard_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
@@ -1653,10 +1820,8 @@ const SCRIPT: &str = r#"
   const statusUrl = `/api/${provider}/status`;
   const pingUrl = `/api/${provider}/ping`;
 
-  const manageUrl =
-    provider === "wireguard"
-      ? "/api/admin/wireguard/manage"
-      : "/api/admin/amneziawg/manage";
+  const inventoryUrl =
+    `/api/${provider}/inventory`;
 
   const refreshButton = document.getElementById("refresh-button");
   const pingAllButton = document.getElementById("ping-all-button");
@@ -2163,17 +2328,9 @@ const SCRIPT: &str = r#"
         ),
 
         fetch(
-          manageUrl,
+          inventoryUrl,
           {
-            method: "POST",
-            headers: {
-              "Content-Type":
-                "application/json"
-            },
-            cache: "no-store",
-            body: JSON.stringify({
-              op: "list"
-            })
+            cache: "no-store"
           }
         )
       ]);
