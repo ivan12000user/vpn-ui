@@ -70,6 +70,9 @@ async fn main() {
 
     let app = web::router(state.clone())
         .merge(settings_manage::router(state))
+        .layer(axum::middleware::from_fn(
+            settings_manage::redirect_legacy_settings,
+        ))
         .layer(TraceLayer::new_for_http());
 
     let listen = env::var("VPN_UI_LISTEN").unwrap_or_else(|_| "127.0.0.1:8090".to_string());
