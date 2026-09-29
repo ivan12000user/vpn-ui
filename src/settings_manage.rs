@@ -51,20 +51,13 @@ async fn settings_manage_page(State(state): State<AppState>) -> impl IntoRespons
   <div class="toolbar settings-toolbar">
     <a class="button primary" href="/settings/manage">Клиенты по умолчанию</a>
     <a class="button" href="/settings/interfaces">Интерфейсы · просмотр</a>
-    <a
-      class="button"
-      href="/api/admin/auth"
-      target="_blank"
-      rel="noopener"
-      title="Авторизация нужна для операций, изменяющих конфигурацию"
-    >🔐 Войти для изменений</a>
   </div>
 </div>
 
 <div class="settings-note">
   Здесь меняются только значения, используемые при создании новых пиров.
   Существующие пиры, wg0/awg0 и серверные интерфейсы не изменяются.
-  Кнопка «Войти для изменений» нужна только для авторизации перед сохранением.
+  Доступ ко всей панели защищается общей авторизацией при входе.
 </div>
 
 <div class="settings-grid safe-settings-grid">
@@ -561,7 +554,7 @@ const SAFE_SETTINGS_SCRIPT: &str = r#"
 
         if (response.status === 401) {
           throw new Error(
-            "Нужна авторизация: нажмите «Войти для изменений», затем повторите сохранение."
+            "Авторизация истекла. Обновите страницу и войдите снова."
           );
         }
 
