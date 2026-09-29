@@ -1,5 +1,6 @@
 mod admin;
 mod geoip;
+mod html_polish;
 mod icon;
 mod settings_manage;
 mod vpn;
@@ -75,6 +76,7 @@ async fn main() {
         .layer(axum::middleware::from_fn(
             settings_manage::redirect_legacy_settings,
         ))
+        .layer(axum::middleware::from_fn(html_polish::polish_html))
         .layer(TraceLayer::new_for_http());
 
     let listen = env::var("VPN_UI_LISTEN").unwrap_or_else(|_| "127.0.0.1:8090".to_string());
