@@ -222,18 +222,8 @@ async fn settings_interfaces_page(State(state): State<AppState>) -> impl IntoRes
 }}
 </style>
 "#,
-        wg = interface_settings_panel(
-            "WireGuard",
-            &state.wireguard.interface,
-            &wg,
-            &wg_fields,
-        ),
-        awg = interface_settings_panel(
-            "AmneziaWG",
-            &state.amneziawg.interface,
-            &awg,
-            &awg_fields,
-        ),
+        wg = interface_settings_panel("WireGuard", &state.wireguard.interface, &wg, &wg_fields,),
+        awg = interface_settings_panel("AmneziaWG", &state.amneziawg.interface, &awg, &awg_fields,),
     );
 
     Html(layout("Настройки", &body))
