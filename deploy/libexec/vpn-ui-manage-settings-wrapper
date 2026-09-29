@@ -1,0 +1,429 @@
+#!/usr/bin/python3
+
+import datetime
+import fcntl
+import ipaddress
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+CORE = pathlib.Path(
+    os.environ.get(
+        "VPN_UI_MANAGE_CORE",
+        "/usr/local/libexec/vpn-ui-manage-core-v070",
+    )
+)
+
+PROVIDERS = {
+    "wireguard": {
+        "inventory": pathlib.Path("/var/lib/vpn-ui/secure/wireguard"),
+        "client_default_allowed": ["10.66.66.0/24"],
+    },
+    "amneziawg": {
+        "inventory": pathlib.Path("/var/lib/vpn-ui/secure/amneziawg"),
+        "client_default_allowed": ["10.77.77.0/24"],
+    },
+}
+
+
+def fail(message, code=1):
+    print(
+        json.dumps(
+            {"ok": False, "error": str(message)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    raise SystemExit(code)
+
+
+def emit(data):
+    print(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def read_raw_request():
+    raw = sys.stdin.read(65537)
+
+    if len(raw) > 65536:
+        fail("request too large", 64)
+
+    try:
+        req = json.loads(raw)
+    except Exception:
+        fail("invalid JSON request", 64)
+
+    if not isinstance(req, dict):
+        fail("request must be an object", 64)
+
+    return raw, req
+
+
+def atomic_json(path, data):
+    payload = (
+        json.dumps(data, ensure_ascii=False, indent=2)
+        + "\n"
+    ).encode()
+
+    fd, tmp = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=".vpn-ui-settings-",
+    )
+
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.chmod(tmp, 0o600)
+        os.chown(tmp, 0, 0)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def normalize_items(value):
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        parts = re.split(r"[\n,]+", value)
+    elif isinstance(value, list):
+        parts = value
+    else:
+        fail("list value must be an array or string", 64)
+
+    result = []
+
+    for item in parts:
+        item = str(item).strip()
+        if item and item not in result:
+            result.append(item)
+
+    return result
+
+
+def normalize_networks(value):
+    items = normalize_items(value)
+
+    if not items:
+        fail("Client AllowedIPs cannot be empty", 64)
+
+    result = []
+
+    for item in items:
+        try:
+            network = str(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            fail(f"invalid network: {item}", 64)
+
+        if network not in result:
+            result.append(network)
+
+    return result
+
+
+def normalize_dns(value):
+    result = []
+
+    for item in normalize_items(value):
+        try:
+            address = str(ipaddress.ip_address(item))
+        except ValueError:
+            fail(f"invalid DNS address: {item}", 64)
+
+        if address not in result:
+            result.append(address)
+
+    return result
+
+
+def normalize_endpoint(value):
+    if not isinstance(value, str):
+        fail("invalid endpoint", 64)
+
+    value = value.strip()
+
+    if not value or any(ch.isspace() for ch in value):
+        fail("endpoint must be host:port", 64)
+
+    host = ""
+    port_text = ""
+
+    if value.startswith("["):
+        match = re.fullmatch(r"\[([^\]]+)\]:(\d+)", value)
+        if not match:
+            fail("invalid endpoint", 64)
+
+        host, port_text = match.groups()
+
+        try:
+            if ipaddress.ip_address(host).version != 6:
+                fail("bracketed endpoint must contain IPv6", 64)
+        except ValueError:
+            fail("invalid IPv6 endpoint", 64)
+    else:
+        if value.count(":") != 1:
+            fail("endpoint must be host:port", 64)
+
+        host, port_text = value.rsplit(":", 1)
+
+        if not host:
+            fail("endpoint host is empty", 64)
+
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            if (
+                len(host) > 253
+                or not re.fullmatch(r"[A-Za-z0-9.-]+", host)
+                or host.startswith(".")
+                or host.endswith(".")
+                or ".." in host
+            ):
+                fail("invalid endpoint host", 64)
+
+    try:
+        port = int(port_text)
+    except ValueError:
+        fail("invalid endpoint port", 64)
+
+    if port < 1 or port > 65535:
+        fail("endpoint port out of range", 64)
+
+    return value
+
+
+def normalize_keepalive(value):
+    if value is None:
+        return ""
+
+    value = str(value).strip()
+
+    if not value:
+        return ""
+
+    try:
+        number = int(value)
+    except ValueError:
+        fail("invalid keepalive", 64)
+
+    if number < 0 or number > 65535:
+        fail("invalid keepalive", 64)
+
+    return "" if number == 0 else str(number)
+
+
+def load_server(cfg):
+    path = cfg["inventory"] / "server.json"
+
+    try:
+        data = json.loads(path.read_text())
+    except Exception as err:
+        fail(f"cannot read server inventory: {err}")
+
+    if not isinstance(data, dict):
+        fail("server inventory must be an object")
+
+    return path, data
+
+
+def safe_settings(cfg, server):
+    client_allowed = server.get("default_client_allowed_ips")
+
+    if not client_allowed:
+        client_allowed = cfg["client_default_allowed"]
+
+    return {
+        "client_allowed_ips": normalize_networks(client_allowed),
+        "dns_servers": normalize_dns(server.get("default_dns_servers") or []),
+        "endpoint": str(server.get("default_endpoint") or "").strip(),
+        "persistent_keepalive": normalize_keepalive(
+            server.get("default_persistent_keepalive")
+        ),
+    }
+
+
+def backup_server(provider, path):
+    stamp = datetime.datetime.now(
+        datetime.timezone.utc
+    ).strftime("%Y%m%dT%H%M%S.%fZ")
+
+    root = pathlib.Path("/var/lib/vpn-ui/backups") / provider
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(root, 0o700)
+
+    backup = root / f"{stamp}-safe-settings-server.json"
+    backup.write_bytes(path.read_bytes())
+    os.chmod(backup, 0o600)
+    os.chown(backup, 0, 0)
+
+    return backup
+
+
+def settings_get(provider, cfg):
+    _, server = load_server(cfg)
+
+    emit(
+        {
+            "ok": True,
+            "provider": provider,
+            "operation": "settings_get",
+            "settings": safe_settings(cfg, server),
+        }
+    )
+
+
+def settings_edit(provider, cfg, req):
+    path, server = load_server(cfg)
+
+    settings = {
+        "client_allowed_ips": normalize_networks(
+            req.get("client_allowed_ips")
+        ),
+        "dns_servers": normalize_dns(req.get("dns_servers") or []),
+        "endpoint": normalize_endpoint(req.get("endpoint")),
+        "persistent_keepalive": normalize_keepalive(
+            req.get("persistent_keepalive")
+        ),
+    }
+
+    backup = backup_server(provider, path)
+    old_bytes = path.read_bytes()
+
+    updated = dict(server)
+    updated["default_client_allowed_ips"] = settings["client_allowed_ips"]
+    updated["default_dns_servers"] = settings["dns_servers"]
+    updated["default_endpoint"] = settings["endpoint"]
+    updated["default_persistent_keepalive"] = settings["persistent_keepalive"]
+
+    try:
+        atomic_json(path, updated)
+        _, check = load_server(cfg)
+        actual = safe_settings(cfg, check)
+
+        if actual != settings:
+            raise RuntimeError("post-write settings verification failed")
+    except Exception as err:
+        try:
+            fd, tmp = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=".vpn-ui-settings-rollback-",
+            )
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(old_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp, 0o600)
+            os.chown(tmp, 0, 0)
+            os.replace(tmp, path)
+        except Exception:
+            fail(f"settings write failed; rollback incomplete: {err}")
+
+        fail(f"settings write failed; rollback completed: {err}")
+
+    emit(
+        {
+            "ok": True,
+            "provider": provider,
+            "operation": "settings_edit",
+            "settings": settings,
+            "backup": backup.name,
+            "interfaces_restarted": False,
+            "existing_peers_changed": False,
+        }
+    )
+
+
+def delegate(provider, raw, req, cfg):
+    if not CORE.is_file():
+        fail(f"management core not found: {CORE}")
+
+    operation = req.get("op")
+
+    if operation == "create" and not req.get("client_allowed_ips"):
+        _, server = load_server(cfg)
+        req = dict(req)
+        req["client_allowed_ips"] = safe_settings(cfg, server)[
+            "client_allowed_ips"
+        ]
+        raw = json.dumps(req, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+    result = subprocess.run(
+        [str(CORE), provider],
+        input=raw,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+
+    if result.returncode != 0:
+        if result.stdout:
+            sys.stdout.write(result.stdout)
+        raise SystemExit(result.returncode)
+
+    if operation != "defaults":
+        sys.stdout.write(result.stdout)
+        return
+
+    try:
+        data = json.loads(result.stdout)
+    except Exception:
+        fail("management core returned invalid defaults JSON")
+
+    _, server = load_server(cfg)
+    data["client_allowed_ips"] = safe_settings(cfg, server)[
+        "client_allowed_ips"
+    ]
+
+    emit(data)
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail("provider argument required", 64)
+
+    provider = sys.argv[1]
+
+    if provider not in PROVIDERS:
+        fail("invalid provider", 64)
+
+    cfg = PROVIDERS[provider]
+    raw, req = read_raw_request()
+    operation = req.get("op")
+
+    if operation in {"settings_get", "settings_edit"}:
+        lock_path = pathlib.Path(f"/run/lock/vpn-ui-{provider}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+
+            if operation == "settings_get":
+                settings_get(provider, cfg)
+            else:
+                settings_edit(provider, cfg, req)
+
+        return
+
+    delegate(provider, raw, req, cfg)
+
+
+if __name__ == "__main__":
+    main()
