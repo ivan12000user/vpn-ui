@@ -53,11 +53,7 @@ pub async fn polish_html(request: Request, next: Next) -> Response {
     html = html.replace(OLD_AUTH_HINT, NEW_AUTH_HINT);
 
     if !html.contains("/favicon.svg") {
-        html = html.replacen(
-            "</head>",
-            &format!("{FAVICON_LINK}\n</head>"),
-            1,
-        );
+        html = html.replacen("</head>", &format!("{FAVICON_LINK}\n</head>"), 1);
     }
 
     parts.headers.remove(header::CONTENT_LENGTH);
