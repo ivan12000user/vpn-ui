@@ -1,5 +1,6 @@
 mod admin;
 mod geoip;
+mod icon;
 mod settings_manage;
 mod vpn;
 mod web;
@@ -70,6 +71,7 @@ async fn main() {
 
     let app = web::router(state.clone())
         .merge(settings_manage::router(state))
+        .merge(icon::router())
         .layer(axum::middleware::from_fn(
             settings_manage::redirect_legacy_settings,
         ))
