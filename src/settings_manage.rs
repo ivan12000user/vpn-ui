@@ -2,18 +2,34 @@ use crate::web::{AppState, layout};
 
 use axum::{
     Router,
-    extract::State,
-    response::{Html, IntoResponse},
+    extract::{Request, State},
+    middleware::Next,
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
 use serde_json::{Value, json};
-use std::process::Stdio;
+use std::{collections::HashMap, process::Stdio};
 use tokio::{io::AsyncWriteExt, process::Command};
+
+#[derive(Default)]
+struct InterfaceSettingsResult {
+    values: HashMap<String, String>,
+    error: Option<String>,
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/settings/manage", get(settings_manage_page))
+        .route("/settings/interfaces", get(settings_interfaces_page))
         .with_state(state)
+}
+
+pub async fn redirect_legacy_settings(request: Request, next: Next) -> Response {
+    if request.uri().path() == "/settings" {
+        return Redirect::temporary("/settings/manage").into_response();
+    }
+
+    next.run(request).await
 }
 
 async fn settings_manage_page(State(state): State<AppState>) -> impl IntoResponse {
@@ -26,27 +42,29 @@ async fn settings_manage_page(State(state): State<AppState>) -> impl IntoRespons
         r#"
 <div class="page-head settings-head">
   <div>
-    <h1>Настройки по умолчанию</h1>
+    <h1>Настройки</h1>
     <p class="lead">
-      Безопасные параметры, используемые при создании новых клиентов.
+      Значения по умолчанию для новых клиентов WireGuard и AmneziaWG.
     </p>
   </div>
 
-  <div class="toolbar">
+  <div class="toolbar settings-toolbar">
+    <a class="button primary" href="/settings/manage">Клиенты по умолчанию</a>
+    <a class="button" href="/settings/interfaces">Интерфейсы · просмотр</a>
     <a
       class="button"
       href="/api/admin/auth"
       target="_blank"
       rel="noopener"
-    >🔐 Управление</a>
-
-    <a class="button" href="/settings">Параметры интерфейсов</a>
+      title="Авторизация нужна для операций, изменяющих конфигурацию"
+    >🔐 Войти для изменений</a>
   </div>
 </div>
 
 <div class="settings-note">
-  Эти параметры применяются только к новым пирам.
+  Здесь меняются только значения, используемые при создании новых пиров.
   Существующие пиры, wg0/awg0 и серверные интерфейсы не изменяются.
+  Кнопка «Войти для изменений» нужна только для авторизации перед сохранением.
 </div>
 
 <div class="settings-grid safe-settings-grid">
@@ -55,6 +73,10 @@ async fn settings_manage_page(State(state): State<AppState>) -> impl IntoRespons
 </div>
 
 <style>
+.settings-toolbar {{
+  justify-content: flex-end;
+}}
+
 .safe-settings-form {{
   padding: 16px 18px 18px;
 }}
@@ -113,6 +135,8 @@ async fn settings_manage_page(State(state): State<AppState>) -> impl IntoRespons
 }}
 
 @media (max-width: 700px) {{
+  .settings-toolbar,
+  .settings-toolbar .button,
   .safe-settings-actions .button {{
     width: 100%;
   }}
@@ -126,7 +150,198 @@ async fn settings_manage_page(State(state): State<AppState>) -> impl IntoRespons
         script = SAFE_SETTINGS_SCRIPT,
     );
 
-    Html(layout("Настройки по умолчанию", &body))
+    Html(layout("Настройки", &body))
+}
+
+async fn settings_interfaces_page(State(state): State<AppState>) -> impl IntoResponse {
+    let (wg, awg) = tokio::join!(
+        read_interface_settings(&state.wg_settings_command),
+        read_interface_settings(&state.awg_settings_command),
+    );
+
+    let wg_fields = [
+        ("Address", "Адрес интерфейса"),
+        ("ListenPort", "UDP порт"),
+        ("MTU", "MTU"),
+        ("Table", "Таблица маршрутизации"),
+    ];
+
+    let awg_fields = [
+        ("Address", "Адрес интерфейса"),
+        ("ListenPort", "UDP порт"),
+        ("Jc", "Jc"),
+        ("Jmin", "Jmin"),
+        ("Jmax", "Jmax"),
+        ("S1", "S1"),
+        ("S2", "S2"),
+        ("S3", "S3"),
+        ("S4", "S4"),
+        ("H1", "H1"),
+        ("H2", "H2"),
+        ("H3", "H3"),
+        ("H4", "H4"),
+    ];
+
+    let body = format!(
+        r#"
+<div class="page-head settings-head">
+  <div>
+    <h1>Настройки</h1>
+    <p class="lead">
+      Текущие параметры работающих интерфейсов WireGuard и AmneziaWG.
+    </p>
+  </div>
+
+  <div class="toolbar settings-toolbar">
+    <a class="button" href="/settings/manage">Клиенты по умолчанию</a>
+    <a class="button primary" href="/settings/interfaces">Интерфейсы · просмотр</a>
+  </div>
+</div>
+
+<div class="settings-note">
+  Этот раздел только для просмотра.
+  Изменение Address, ListenPort, MTU и параметров AmneziaWG требует отдельного
+  безопасного механизма применения и rollback и здесь пока не выполняется.
+</div>
+
+<div class="settings-grid">
+  {wg}
+  {awg}
+</div>
+
+<style>
+.settings-toolbar {{
+  justify-content: flex-end;
+}}
+
+@media (max-width: 700px) {{
+  .settings-toolbar,
+  .settings-toolbar .button {{
+    width: 100%;
+  }}
+}}
+</style>
+"#,
+        wg = interface_settings_panel(
+            "WireGuard",
+            &state.wireguard.interface,
+            &wg,
+            &wg_fields,
+        ),
+        awg = interface_settings_panel(
+            "AmneziaWG",
+            &state.amneziawg.interface,
+            &awg,
+            &awg_fields,
+        ),
+    );
+
+    Html(layout("Настройки", &body))
+}
+
+async fn read_interface_settings(command: &str) -> InterfaceSettingsResult {
+    let output = match Command::new(command).output().await {
+        Ok(output) => output,
+        Err(err) => {
+            return InterfaceSettingsResult {
+                values: HashMap::new(),
+                error: Some(format!("cannot execute {command}: {err}")),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        return InterfaceSettingsResult {
+            values: HashMap::new(),
+            error: Some(if stderr.is_empty() {
+                format!("{command} returned {}", output.status)
+            } else {
+                stderr
+            }),
+        };
+    }
+
+    let mut values = HashMap::new();
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.splitn(2, '\t');
+
+        let key = fields.next().unwrap_or_default().trim();
+        let value = fields.next().unwrap_or_default().trim();
+
+        if !key.is_empty() {
+            values.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    InterfaceSettingsResult {
+        values,
+        error: None,
+    }
+}
+
+fn interface_settings_panel(
+    title: &str,
+    interface: &str,
+    settings: &InterfaceSettingsResult,
+    fields: &[(&str, &str)],
+) -> String {
+    let error = settings
+        .error
+        .as_ref()
+        .map(|value| {
+            format!(
+                r#"<div class="alert error">Не удалось прочитать настройки: {}</div>"#,
+                escape_html(value)
+            )
+        })
+        .unwrap_or_default();
+
+    let mut rows = String::new();
+
+    for (key, label) in fields {
+        let value = settings.values.get(*key).map(String::as_str).unwrap_or("—");
+
+        rows.push_str(&format!(
+            r#"
+<div class="setting-row">
+  <div class="setting-label">
+    <span>{label}</span>
+    <small>{key}</small>
+  </div>
+  <div class="setting-value mono">{value}</div>
+</div>
+"#,
+            label = escape_html(label),
+            key = escape_html(key),
+            value = escape_html(value),
+        ));
+    }
+
+    format!(
+        r#"
+<section class="settings-panel">
+  <div class="settings-panel-head">
+    <div>
+      <h2>{title}</h2>
+      <div class="muted mono">{interface}</div>
+    </div>
+  </div>
+
+  {error}
+
+  <div class="settings-list">
+    {rows}
+  </div>
+</section>
+"#,
+        title = escape_html(title),
+        interface = escape_html(interface),
+        error = error,
+        rows = rows,
+    )
 }
 
 fn settings_form(provider: &str, title: &str, result: &Result<Value, String>) -> String {
@@ -356,7 +571,7 @@ const SAFE_SETTINGS_SCRIPT: &str = r#"
 
         if (response.status === 401) {
           throw new Error(
-            "Нужна авторизация: откройте «🔐 Управление», затем повторите сохранение."
+            "Нужна авторизация: нажмите «Войти для изменений», затем повторите сохранение."
           );
         }
 
