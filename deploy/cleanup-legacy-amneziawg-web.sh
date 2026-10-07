@@ -74,6 +74,24 @@ BEFORE="$(capture_protected_state)"
 printf '%s\n' "$BEFORE"
 
 echo
+echo '===== QUIESCE LEGACY SERVICE FOR CONSISTENT BACKUP ====='
+systemctl stop "$LEGACY_UNIT"
+sleep 1
+if systemctl is-active --quiet "$LEGACY_UNIT"; then
+    echo 'ERROR: legacy service did not stop' >&2
+    exit 1
+fi
+
+prebackup_failed() {
+    rc=$?
+    trap - ERR
+    echo "BACKUP PREPARATION FAILED rc=$rc — restarting legacy service" >&2
+    systemctl start "$LEGACY_UNIT" || true
+    exit "$rc"
+}
+trap prebackup_failed ERR
+
+echo
 echo '===== BACKUP LEGACY STACK ====='
 PATHS=(
   /etc/systemd/system/amneziawg-web.service
@@ -116,6 +134,8 @@ echo "backup   = $BACKUP"
 echo "manifest = $MANIFEST"
 du -h "$BACKUP"
 
+trap - ERR
+
 rollback() {
     rc=$?
     trap - ERR
@@ -134,7 +154,7 @@ trap rollback ERR
 
 echo
 echo '===== DISABLE LEGACY SERVICE ====='
-systemctl disable --now "$LEGACY_UNIT"
+systemctl disable "$LEGACY_UNIT"
 sleep 1
 
 if systemctl is-active --quiet "$LEGACY_UNIT"; then
