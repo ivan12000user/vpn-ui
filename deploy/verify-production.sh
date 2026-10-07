@@ -272,15 +272,47 @@ try:
     print("Nginx HTTPS unauthenticated = HTTP 401")
 
     print()
-    print("===== LEGACY UI SERVICES (INFORMATION ONLY) =====")
-    for unit in (
+    print("===== LEGACY UI ABSENCE =====")
+    legacy_units = (
         "wgui.path",
         "wgui.service",
         "wireguard-ui-daemon.service",
         "amneziawg-web.service",
+    )
+
+    for unit in legacy_units:
+        load = run(
+            ["systemctl", "show", unit, "-p", "LoadState", "--value"],
+            check=False,
+        ).stdout.strip()
+        if load != "not-found":
+            raise RuntimeError(f"legacy unit still present: {unit} ({load})")
+
+    listeners = output(["ss", "-lntp"])
+    for port in (5001, 5002, 5003, 5004, 8080):
+        if re.search(rf":{port}\\s", listeners):
+            raise RuntimeError(f"legacy TCP listener still present: {port}")
+
+    if run(["getent", "passwd", "awg-web"], check=False).returncode == 0:
+        raise RuntimeError("legacy awg-web user still exists")
+    if run(["getent", "group", "awg-web"], check=False).returncode == 0:
+        raise RuntimeError("legacy awg-web group still exists")
+
+    for path in (
+        "/etc/wireguard/wireguard-ui",
+        "/etc/wireguard/.env",
+        "/usr/local/bin/amneziawg-web",
+        "/usr/local/libexec/amneziawg-web-privileged",
+        "/etc/amneziawg-web",
+        "/var/lib/amneziawg-web",
     ):
-        active, enabled = service_state(unit)
-        print(f"{unit}: active={active} enabled={enabled}")
+        if Path(path).exists():
+            raise RuntimeError(f"legacy path still exists: {path}")
+
+    print("legacy systemd units = none")
+    print("legacy TCP listeners = none")
+    print("legacy awg-web account/group = none")
+    print("legacy UI files = none")
 
     print()
     print("========================================")
@@ -289,6 +321,7 @@ try:
     print("WG = IPv4-only")
     print("AWG = unchanged")
     print("PUBLIC VPS IPv6 = present")
+    print("LEGACY UI = none")
     print("========================================")
 
 except Exception as exc:
