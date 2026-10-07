@@ -37,6 +37,11 @@ LEGACY_WG_FILES=(
   /etc/wireguard/.env
 )
 
+LEGACY_NGINX_FILES=(
+  /etc/nginx/sites-available/wireguard-ui-5000.conf
+  /etc/nginx/sites-enabled/wireguard-ui-5000.conf
+)
+
 count_inventory() {
     local helper="$1"
     printf '%s\n' '{"op":"list"}' |
@@ -99,15 +104,22 @@ if ss -lntp | grep -Eq ':(5001)[[:space:]]'; then
     exit 1
 fi
 
-# Current vpn-ui must not reference the legacy WG daemon, watcher or environment.
+# Only the known legacy Nginx site and legacy units may reference the old WG UI.
 python3 - <<'PY'
 from pathlib import Path
 
-roots = [
+allowed = {
+    "/etc/nginx/sites-available/wireguard-ui-5000.conf",
+    "/etc/systemd/system/wgui.path",
+    "/etc/systemd/system/wgui.service",
+    "/etc/systemd/system/wireguard-ui-daemon.service",
+}
+
+roots = (
     Path("/etc/nginx"),
-    Path("/etc/systemd/system/vpn-ui.service"),
-    Path("/etc/systemd/system/vpn-ui.service.d"),
-]
+    Path("/etc/systemd/system"),
+)
+
 needles = (
     "wireguard-ui",
     "wireguard-ui-daemon",
@@ -116,26 +128,29 @@ needles = (
     "wgui.path",
     "127.0.0.1:5001",
 )
+
 bad=[]
 
 for root in roots:
-    paths=[]
-    if root.is_file():
-        paths=[root]
-    elif root.is_dir():
-        paths=[p for p in root.rglob("*") if p.is_file() and not p.is_symlink()]
-
-    for path in paths:
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
         try:
             text=path.read_text(errors="ignore")
         except Exception:
             continue
-        if any(n in text for n in needles):
+        if any(n in text for n in needles) and str(path) not in allowed:
             bad.append(str(path))
 
 if bad:
-    raise SystemExit("current stack references legacy WG UI: " + ", ".join(sorted(set(bad))))
+    raise SystemExit(
+        "unexpected references to legacy WG UI: "
+        + ", ".join(sorted(set(bad)))
+    )
 PY
+
+[[ -f /etc/nginx/sites-available/wireguard-ui-5000.conf ]]
+[[ -L /etc/nginx/sites-enabled/wireguard-ui-5000.conf ]]
 
 BEFORE="$(capture_protected_state)"
 printf '%s\n' "$BEFORE"
@@ -170,6 +185,7 @@ echo '===== BACKUP FINAL LEGACY STATE ====='
 PATHS=(
   "${LEGACY_UNIT_FILES[@]}"
   "${LEGACY_WG_FILES[@]}"
+  "${LEGACY_NGINX_FILES[@]}"
   /etc/amnezia/amneziawg/clients
 )
 
@@ -240,7 +256,20 @@ rm -f   /etc/systemd/system/wgui.path   /etc/systemd/system/wgui.service   /etc/
 
 echo
 echo '===== REMOVE LEGACY WG UI FILES ====='
-rm -f   /etc/wireguard/wireguard-ui   /etc/wireguard/.env
+rm -f \
+  /etc/wireguard/wireguard-ui \
+  /etc/wireguard/.env
+
+echo
+echo '===== REMOVE LEGACY WG NGINX FRONTEND ====='
+rm -f \
+  /etc/nginx/sites-enabled/wireguard-ui-5000.conf \
+  /etc/nginx/sites-available/wireguard-ui-5000.conf
+
+nginx -t
+systemctl reload nginx
+sleep 1
+systemctl is-active --quiet nginx
 
 systemctl daemon-reload
 systemctl reset-failed wgui.path wgui.service wireguard-ui-daemon.service >/dev/null 2>&1 || true
@@ -273,6 +302,12 @@ if getent group awg-web >/dev/null; then
     groupdel awg-web
 fi
 
+if find /etc/amnezia/amneziawg/clients -maxdepth 1 \
+     \( ! -user root -o ! -group root \) -print -quit 2>/dev/null | grep -q .; then
+    echo 'ERROR: AWG client configs are not root-owned after account retirement' >&2
+    false
+fi
+
 echo
 echo '===== VERIFY LEGACY ABSENCE ====='
 for unit in "${LEGACY_UNITS[@]}"; do
@@ -283,9 +318,9 @@ for unit in "${LEGACY_UNITS[@]}"; do
     fi
 done
 
-if ss -lntp | grep -Eq ':(5001|5002|5003|5004|8080)[[:space:]]'; then
+if ss -lntp | grep -Eq ':(5000|5001|5002|5003|5004|8080)[[:space:]]'; then
     echo 'ERROR: legacy UI listener remains' >&2
-    ss -lntp | grep -E ':(5001|5002|5003|5004|8080)[[:space:]]' >&2 || true
+    ss -lntp | grep -E ':(5000|5001|5002|5003|5004|8080)[[:space:]]' >&2 || true
     false
 fi
 
@@ -294,7 +329,7 @@ if getent passwd awg-web >/dev/null || getent group awg-web >/dev/null; then
     false
 fi
 
-for p in "${LEGACY_UNIT_FILES[@]}" "${LEGACY_WG_FILES[@]}"; do
+for p in "${LEGACY_UNIT_FILES[@]}" "${LEGACY_WG_FILES[@]}" "${LEGACY_NGINX_FILES[@]}"; do
     if [[ -e "$p" || -L "$p" ]]; then
         echo "ERROR: legacy path remains: $p" >&2
         false
@@ -331,7 +366,8 @@ echo '========================================'
 echo 'FINAL LEGACY CLEANUP = PASS'
 echo 'WGUI PATH/SERVICE = REMOVED'
 echo 'WIREGUARD-UI DAEMON = REMOVED'
-echo 'LEGACY TCP 5001/5002/5003/5004/8080 = ABSENT'
+echo 'WIREGUARD-UI NGINX FRONTEND = REMOVED'
+echo 'LEGACY TCP 5000/5001/5002/5003/5004/8080 = ABSENT'
 echo 'AWG-WEB ACCOUNT/GROUP = REMOVED'
 echo 'AWG CLIENT CONFIG FILES = PRESERVED, ROOT-OWNED'
 echo 'WG UDP 51820 = PRESENT'
