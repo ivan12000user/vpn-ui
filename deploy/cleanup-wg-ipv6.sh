@@ -56,9 +56,19 @@ systemctl is-active --quiet vpn-ui.service
 systemctl is-active --quiet nginx
 nginx -t >/dev/null
 
-# Persistent WG config must already be IPv4-only.
-if grep -qiE 'fd66:66:66|(^|[^0-9A-Fa-f:])([0-9A-Fa-f]{0,4}:){2,}' /etc/wireguard/wg0.conf; then
-    echo 'ERROR: persistent wg0.conf still contains IPv6; refusing automatic cleanup' >&2
+# Persistent WG config must not contain the experimental ULA.
+# Other IPv6 text (for example an IPv6 Endpoint) is allowed and must be preserved.
+if grep -qiF 'fd66:66:66' /etc/wireguard/wg0.conf; then
+    echo 'ERROR: persistent wg0.conf contains experimental fd66:66:66 state; refusing automatic cleanup' >&2
+    python3 - <<'PY'
+from pathlib import Path
+for n, raw in enumerate(Path("/etc/wireguard/wg0.conf").read_text().splitlines(), 1):
+    if "fd66:66:66" in raw.lower():
+        line=raw.strip()
+        if line.lower().startswith(("privatekey","publickey","presharedkey")):
+            continue
+        print(f"line {n}: {line}")
+PY
     exit 1
 fi
 
