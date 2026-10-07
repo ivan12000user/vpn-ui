@@ -1,0 +1,2284 @@
+#!/usr/bin/python3
+
+import base64
+import copy
+import datetime
+import fcntl
+import hashlib
+import ipaddress
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+
+PROVIDERS = {
+    "wireguard": {
+        "short": "wg",
+        "iface": "wg0",
+        "tool": "/usr/bin/wg",
+        "quick": "/usr/bin/wg-quick",
+        "config": pathlib.Path("/etc/wireguard/wg0.conf"),
+        "inventory": pathlib.Path(
+            "/var/lib/vpn-ui/secure/wireguard"
+        ),
+        "network": ipaddress.ip_network(
+            "10.66.66.0/24"
+        ),
+        "client_default_allowed": [
+            "10.66.66.0/24"
+        ],
+        "candidate": pathlib.Path(
+            "/run/vpnuiwg.conf"
+        ),
+        "stripped": pathlib.Path(
+            "/run/vpnuiwg.sync"
+        ),
+    },
+
+    "amneziawg": {
+        "short": "awg",
+        "iface": "awg0",
+        "tool": "/usr/bin/awg",
+        "quick": "/usr/bin/awg-quick",
+        "config": pathlib.Path(
+            "/etc/amnezia/amneziawg/awg0.conf"
+        ),
+        "inventory": pathlib.Path(
+            "/var/lib/vpn-ui/secure/amneziawg"
+        ),
+        "network": ipaddress.ip_network(
+            "10.77.77.0/24"
+        ),
+        "client_default_allowed": [
+            "10.77.77.0/24"
+        ],
+        "candidate": pathlib.Path(
+            "/run/vpnuiawg.conf"
+        ),
+        "stripped": pathlib.Path(
+            "/run/vpnuiawg.sync"
+        ),
+    },
+}
+
+
+def fail(message, code=1):
+    print(
+        json.dumps(
+            {
+                "ok": False,
+                "error": str(message),
+            },
+            ensure_ascii=False,
+        )
+    )
+    raise SystemExit(code)
+
+
+def emit(data):
+    print(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def read_request():
+    raw = sys.stdin.read(65537)
+
+    if len(raw) > 65536:
+        fail("request too large", 64)
+
+    try:
+        req = json.loads(raw)
+    except Exception:
+        fail("invalid JSON request", 64)
+
+    if not isinstance(req, dict):
+        fail("request must be an object", 64)
+
+    return req
+
+
+def run(command, input_text=None):
+    result = subprocess.run(
+        command,
+        input=input_text,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"command failed: {command[0]}"
+        )
+
+    return result.stdout
+
+
+def valid_public_key(value):
+    if not isinstance(value, str):
+        return False
+
+    if len(value) != 44:
+        return False
+
+    try:
+        raw = base64.b64decode(
+            value,
+            validate=True,
+        )
+    except Exception:
+        return False
+
+    return len(raw) == 32
+
+
+def require_public_key(value):
+    if not valid_public_key(value):
+        fail("invalid public key", 64)
+
+    return value
+
+
+def clean_name(value):
+    if not isinstance(value, str):
+        fail("invalid peer name", 64)
+
+    value = value.strip()
+
+    if not value or len(value) > 64:
+        fail("invalid peer name", 64)
+
+    if any(
+        ord(ch) < 32
+        for ch in value
+    ):
+        fail("invalid peer name", 64)
+
+    return value
+
+
+def normalize_values(value):
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        parts = value.split(",")
+
+    elif isinstance(value, list):
+        parts = value
+
+    else:
+        fail("network list must be array or string", 64)
+
+    result = []
+
+    for item in parts:
+        item = str(item).strip()
+
+        if not item:
+            continue
+
+        if item not in result:
+            result.append(item)
+
+    return result
+
+
+def networks(value, allow_empty=False):
+    values = normalize_values(value)
+
+    if values is None:
+        return None
+
+    result = []
+
+    for item in values:
+        try:
+            net = ipaddress.ip_network(
+                item,
+                strict=False,
+            )
+        except ValueError:
+            fail(
+                f"invalid network: {item}",
+                64,
+            )
+
+        canonical = str(net)
+
+        if canonical not in result:
+            result.append(canonical)
+
+    if not result and not allow_empty:
+        fail("network list cannot be empty", 64)
+
+    return result
+
+
+def client_address(cfg, value):
+    if not isinstance(value, str):
+        fail("invalid VPN address", 64)
+
+    value = value.strip()
+
+    if "/" not in value:
+        value += "/32"
+
+    try:
+        iface = ipaddress.ip_interface(
+            value
+        )
+    except ValueError:
+        fail("invalid VPN address", 64)
+
+    if iface.version != 4:
+        fail("VPN address must be IPv4", 64)
+
+    if iface.network.prefixlen != 32:
+        fail("VPN address must be /32", 64)
+
+    network = cfg["network"]
+
+    if iface.ip not in network:
+        fail(
+            "VPN address outside provider subnet",
+            64,
+        )
+
+    if iface.ip not in network.hosts():
+        fail("invalid host address", 64)
+
+    server_ip = next(
+        network.hosts()
+    )
+
+    if iface.ip == server_ip:
+        fail("server VPN address is reserved", 64)
+
+    return str(iface)
+
+
+def keepalive_value(value):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if value == "":
+        return ""
+
+    try:
+        number = int(value)
+    except ValueError:
+        fail("invalid keepalive", 64)
+
+    if number < 0 or number > 65535:
+        fail("invalid keepalive", 64)
+
+    if number == 0:
+        return ""
+
+    return str(number)
+
+
+def atomic_bytes(path, data, mode=0o600):
+    path = pathlib.Path(path)
+
+    fd, tmp = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=".vpn-ui-",
+    )
+
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.chmod(tmp, mode)
+        os.chown(tmp, 0, 0)
+        os.replace(tmp, path)
+
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def atomic_json(path, data):
+    payload = (
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    ).encode()
+
+    atomic_bytes(
+        path,
+        payload,
+        0o600,
+    )
+
+
+def load_server(cfg):
+    path = (
+        cfg["inventory"]
+        / "server.json"
+    )
+
+    return json.loads(
+        path.read_text()
+    )
+
+
+def load_records(cfg):
+    root = (
+        cfg["inventory"]
+        / "clients"
+    )
+
+    records = {}
+
+    for path in sorted(
+        root.glob("*.json")
+    ):
+        data = json.loads(
+            path.read_text()
+        )
+
+        public = data.get(
+            "public_key"
+        )
+
+        if not valid_public_key(public):
+            fail(
+                f"invalid inventory public key: "
+                f"{path.name}"
+            )
+
+        if public in records:
+            fail(
+                "duplicate inventory public key"
+            )
+
+        records[public] = {
+            "path": path,
+            "data": data,
+        }
+
+    return records
+
+
+PEER_RE = re.compile(
+    r"(?m)^[ \t]*\[Peer\][ \t]*(?:\r?\n|$)"
+)
+
+
+def parse_block(block):
+    result = {}
+
+    for raw in block.splitlines():
+        line = raw.strip()
+
+        if (
+            not line
+            or line.startswith("#")
+            or line.startswith(";")
+            or "=" not in line
+        ):
+            continue
+
+        key, value = line.split(
+            "=",
+            1,
+        )
+
+        result.setdefault(
+            key.strip(),
+            [],
+        ).append(
+            value.strip()
+        )
+
+    return result
+
+
+def peer_spans(text):
+    matches = list(
+        PEER_RE.finditer(text)
+    )
+
+    spans = []
+
+    for index, match in enumerate(matches):
+        start = match.start()
+
+        if index + 1 < len(matches):
+            end = matches[
+                index + 1
+            ].start()
+        else:
+            end = len(text)
+
+        block = text[start:end]
+        values = parse_block(block)
+
+        public = (
+            values.get("PublicKey")
+            or [""]
+        )[0]
+
+        spans.append(
+            {
+                "start": start,
+                "end": end,
+                "block": block,
+                "public_key": public,
+            }
+        )
+
+    return spans
+
+
+def config_public_keys(text):
+    result = set()
+
+    for span in peer_spans(text):
+        public = span[
+            "public_key"
+        ]
+
+        if not valid_public_key(
+            public
+        ):
+            fail(
+                "invalid/missing PublicKey "
+                "in server config"
+            )
+
+        if public in result:
+            fail(
+                "duplicate PublicKey "
+                "in server config"
+            )
+
+        result.add(public)
+
+    return result
+
+
+def enabled_public_keys(records):
+    return {
+        public
+        for public, item in records.items()
+        if bool(
+            item["data"].get(
+                "enabled",
+                True,
+            )
+        )
+    }
+
+
+def live_public_keys(cfg):
+    output = run(
+        [
+            cfg["tool"],
+            "show",
+            cfg["iface"],
+            "peers",
+        ]
+    )
+
+    return {
+        line.strip()
+        for line in output.splitlines()
+        if line.strip()
+    }
+
+
+def assert_write_state(
+    cfg,
+    records,
+    config_text,
+):
+    inventory = enabled_public_keys(
+        records
+    )
+
+    persistent = config_public_keys(
+        config_text
+    )
+
+    live = live_public_keys(
+        cfg
+    )
+
+    if inventory != persistent:
+        fail(
+            "inventory/server-config drift; "
+            "write refused"
+        )
+
+    if persistent != live:
+        fail(
+            "server-config/live drift; "
+            "write refused"
+        )
+
+
+def record_extra_routes(record):
+    explicit = record.get(
+        "extra_allowed_ips"
+    )
+
+    if explicit is not None:
+        return list(explicit)
+
+    allocated = set(
+        record.get(
+            "allocated_ips"
+        ) or []
+    )
+
+    return [
+        item
+        for item in (
+            record.get(
+                "server_allowed_ips"
+            ) or []
+        )
+        if item not in allocated
+    ]
+
+
+def summary(record):
+    allocated = (
+        record.get(
+            "allocated_ips"
+        )
+        or []
+    )
+
+    return {
+        "id": record.get("id"),
+        "name": record.get("name"),
+        "enabled": bool(
+            record.get(
+                "enabled",
+                True,
+            )
+        ),
+        "public_key":
+            record.get("public_key"),
+        "vpn_ip":
+            allocated[0]
+            if allocated
+            else None,
+        "client_allowed_ips":
+            record.get(
+                "client_allowed_ips"
+            )
+            or [],
+        "server_allowed_ips":
+            record.get(
+                "server_allowed_ips"
+            )
+            or [],
+        "extra_server_allowed_ips":
+            record_extra_routes(
+                record
+            ),
+        "persistent_keepalive":
+            record.get(
+                "persistent_keepalive"
+            )
+            or "",
+    }
+
+
+def used_addresses(records):
+    used = set()
+
+    for item in records.values():
+        for value in (
+            item["data"].get(
+                "allocated_ips"
+            )
+            or []
+        ):
+            try:
+                used.add(
+                    ipaddress.ip_interface(
+                        value
+                    ).ip
+                )
+            except ValueError:
+                fail(
+                    "invalid address in inventory"
+                )
+
+    return used
+
+
+def next_address(cfg, records):
+    used = used_addresses(
+        records
+    )
+
+    hosts = list(
+        cfg["network"].hosts()
+    )
+
+    # First host is server (.1).
+    for ip in hosts[1:]:
+        if ip not in used:
+            return f"{ip}/32"
+
+    fail("VPN address pool exhausted")
+
+
+def ensure_unique(
+    records,
+    name,
+    vpn_ip,
+    exclude_public=None,
+):
+    wanted_ip = ipaddress.ip_interface(
+        vpn_ip
+    ).ip
+
+    wanted_name = name.casefold()
+
+    for public, item in records.items():
+        if public == exclude_public:
+            continue
+
+        record = item["data"]
+
+        old_name = str(
+            record.get("name")
+            or ""
+        ).casefold()
+
+        if old_name == wanted_name:
+            fail(
+                "peer name already exists",
+                64,
+            )
+
+        for value in (
+            record.get(
+                "allocated_ips"
+            )
+            or []
+        ):
+            if (
+                ipaddress.ip_interface(
+                    value
+                ).ip
+                == wanted_ip
+            ):
+                fail(
+                    "VPN address already used",
+                    64,
+                )
+
+
+def generate_keys(cfg):
+    private = run(
+        [
+            cfg["tool"],
+            "genkey",
+        ]
+    ).strip()
+
+    public = run(
+        [
+            cfg["tool"],
+            "pubkey",
+        ],
+        private + "\n",
+    ).strip()
+
+    psk = run(
+        [
+            cfg["tool"],
+            "genpsk",
+        ]
+    ).strip()
+
+    if not (
+        valid_public_key(private)
+        and valid_public_key(public)
+        and valid_public_key(psk)
+    ):
+        fail("key generation failed")
+
+    return private, public, psk
+
+
+def interface_values(text):
+    match = PEER_RE.search(text)
+
+    if match:
+        header = text[
+            :match.start()
+        ]
+    else:
+        header = text
+
+    return parse_block(
+        header
+    )
+
+
+AWG_CLIENT_KEYS = [
+    "Jc",
+    "Jmin",
+    "Jmax",
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+]
+
+
+def new_record(
+    provider,
+    cfg,
+    server,
+    config_text,
+    records,
+    req,
+):
+    name = clean_name(
+        req.get("name")
+    )
+
+    vpn_ip = req.get(
+        "vpn_ip"
+    )
+
+    if vpn_ip:
+        vpn_ip = client_address(
+            cfg,
+            vpn_ip,
+        )
+    else:
+        vpn_ip = next_address(
+            cfg,
+            records,
+        )
+
+    ensure_unique(
+        records,
+        name,
+        vpn_ip,
+    )
+
+    allowed = networks(
+        req.get(
+            "client_allowed_ips",
+            cfg[
+                "client_default_allowed"
+            ],
+        )
+    )
+
+    extra = networks(
+        req.get(
+            "extra_server_allowed_ips",
+            [],
+        ),
+        allow_empty=True,
+    )
+
+    if extra is None:
+        extra = []
+
+    server_allowed = [
+        vpn_ip
+    ]
+
+    for value in extra:
+        if value not in server_allowed:
+            server_allowed.append(
+                value
+            )
+
+    private, public, psk = (
+        generate_keys(cfg)
+    )
+
+    keepalive = keepalive_value(
+        req.get(
+            "persistent_keepalive"
+        )
+    )
+
+    if keepalive is None:
+        keepalive = str(
+            server.get(
+                "default_persistent_keepalive"
+            )
+            or ""
+        ).strip()
+
+    now = datetime.datetime.now(
+        datetime.timezone.utc
+    ).isoformat()
+
+    prefix = (
+        "wg"
+        if provider == "wireguard"
+        else "awg"
+    )
+
+    peer_id = (
+        prefix
+        + "-"
+        + hashlib.sha256(
+            public.encode()
+        ).hexdigest()[:16]
+    )
+
+    enabled = req.get(
+        "enabled",
+        True,
+    )
+
+    if not isinstance(
+        enabled,
+        bool,
+    ):
+        fail("enabled must be boolean", 64)
+
+    if provider == "wireguard":
+        record = {
+            "schema": 2,
+            "provider": "wireguard",
+            "id": peer_id,
+            "name": name,
+            "enabled": enabled,
+            "private_key": private,
+            "public_key": public,
+            "preshared_key": psk,
+            "allocated_ips": [
+                vpn_ip
+            ],
+            "client_allowed_ips":
+                allowed,
+            "server_allowed_ips":
+                server_allowed,
+            "extra_allowed_ips":
+                extra,
+            "dns_servers":
+                server.get(
+                    "default_dns_servers"
+                )
+                or [],
+            "use_server_dns": True,
+            "endpoint": "",
+            "persistent_keepalive":
+                keepalive,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    else:
+        values = interface_values(
+            config_text
+        )
+
+        options = {}
+
+        for key in AWG_CLIENT_KEYS:
+            vals = values.get(key)
+
+            if not vals:
+                fail(
+                    f"AWG server option "
+                    f"{key} missing"
+                )
+
+            options[key] = list(
+                vals
+            )
+
+        record = {
+            "schema": 1,
+            "provider": "amneziawg",
+            "id": peer_id,
+            "name": name,
+            "enabled": enabled,
+            "private_key": private,
+            "public_key": public,
+            "preshared_key": psk,
+            "allocated_ips": [
+                vpn_ip
+            ],
+            "client_allowed_ips":
+                allowed,
+            "server_allowed_ips":
+                server_allowed,
+            "extra_allowed_ips":
+                extra,
+            "dns_servers":
+                server.get(
+                    "default_dns_servers"
+                )
+                or [],
+            "endpoint":
+                server.get(
+                    "default_endpoint"
+                )
+                or "",
+            "persistent_keepalive":
+                keepalive,
+            "interface_options":
+                options,
+            "client_peer_options":
+                {},
+            "server_peer_options":
+                {
+                    "AdvancedSecurity": [
+                        "off"
+                    ]
+                },
+            "legacy_client_file":
+                None,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    return record
+
+
+OPTION_NAME = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_-]*$"
+)
+
+
+def safe_option_lines(
+    options,
+    forbidden,
+):
+    lines = []
+
+    if not options:
+        return lines
+
+    if not isinstance(
+        options,
+        dict,
+    ):
+        fail("invalid peer options")
+
+    for key, values in options.items():
+        key = str(key)
+
+        if key in forbidden:
+            continue
+
+        if not OPTION_NAME.fullmatch(
+            key
+        ):
+            fail(
+                "invalid peer option"
+            )
+
+        if not isinstance(
+            values,
+            list,
+        ):
+            values = [values]
+
+        for value in values:
+            value = str(
+                value
+            ).strip()
+
+            if (
+                "\n" in value
+                or "\r" in value
+            ):
+                fail(
+                    "invalid peer option"
+                )
+
+            if value:
+                lines.append(
+                    f"{key} = {value}"
+                )
+
+    return lines
+
+
+def render_peer(provider, record):
+    lines = [
+        "[Peer]",
+        "PublicKey = "
+        + record["public_key"],
+        "PresharedKey = "
+        + record["preshared_key"],
+    ]
+
+    if provider == "wireguard":
+        lines.append(
+            "AllowedIPs = "
+            + ", ".join(
+                record[
+                    "server_allowed_ips"
+                ]
+            )
+        )
+
+        keepalive = str(
+            record.get(
+                "persistent_keepalive"
+            )
+            or ""
+        ).strip()
+
+        if keepalive:
+            lines.append(
+                "PersistentKeepalive = "
+                + keepalive
+            )
+
+    else:
+        options = copy.deepcopy(
+            record.get(
+                "server_peer_options"
+            )
+            or {}
+        )
+
+        advanced = options.pop(
+            "AdvancedSecurity",
+            [],
+        )
+
+        endpoint = options.pop(
+            "Endpoint",
+            [],
+        )
+
+        option_keepalive = (
+            options.pop(
+                "PersistentKeepalive",
+                [],
+            )
+        )
+
+        if advanced:
+            for value in advanced:
+                lines.append(
+                    "AdvancedSecurity = "
+                    + str(value)
+                )
+        else:
+            lines.append(
+                "AdvancedSecurity = off"
+            )
+
+        lines.extend(
+            safe_option_lines(
+                options,
+                {
+                    "PublicKey",
+                    "PresharedKey",
+                    "AllowedIPs",
+                    "Endpoint",
+                    "PersistentKeepalive",
+                    "AdvancedSecurity",
+                },
+            )
+        )
+
+        lines.append(
+            "AllowedIPs = "
+            + ", ".join(
+                record[
+                    "server_allowed_ips"
+                ]
+            )
+        )
+
+        for value in endpoint:
+            value = str(
+                value
+            ).strip()
+
+            if value:
+                lines.append(
+                    "Endpoint = "
+                    + value
+                )
+
+        keepalive = str(
+            record.get(
+                "persistent_keepalive"
+            )
+            or ""
+        ).strip()
+
+        if not keepalive:
+            if option_keepalive:
+                keepalive = str(
+                    option_keepalive[0]
+                ).strip()
+
+        if keepalive:
+            lines.append(
+                "PersistentKeepalive = "
+                + keepalive
+            )
+
+    return "\n".join(
+        lines
+    )
+
+
+def find_span(text, public):
+    found = [
+        span
+        for span in peer_spans(text)
+        if span["public_key"] == public
+    ]
+
+    if len(found) > 1:
+        fail(
+            "duplicate peer in server config"
+        )
+
+    return (
+        found[0]
+        if found
+        else None
+    )
+
+
+def append_peer(
+    text,
+    provider,
+    record,
+):
+    if find_span(
+        text,
+        record["public_key"],
+    ):
+        fail(
+            "peer already exists "
+            "in server config"
+        )
+
+    base = text.rstrip()
+
+    return (
+        base
+        + "\n\n"
+        + render_peer(
+            provider,
+            record,
+        )
+        + "\n"
+    )
+
+
+def replace_peer(
+    text,
+    provider,
+    record,
+):
+    span = find_span(
+        text,
+        record["public_key"],
+    )
+
+    if not span:
+        fail(
+            "enabled peer missing "
+            "from server config"
+        )
+
+    suffix = (
+        "\n\n"
+        if span["end"] < len(text)
+        else "\n"
+    )
+
+    return (
+        text[:span["start"]]
+        + render_peer(
+            provider,
+            record,
+        )
+        + suffix
+        + text[span["end"]:]
+    )
+
+
+def remove_peer(
+    text,
+    public,
+):
+    span = find_span(
+        text,
+        public,
+    )
+
+    if not span:
+        fail(
+            "peer missing "
+            "from server config"
+        )
+
+    new = (
+        text[:span["start"]]
+        + text[span["end"]:]
+    )
+
+    return (
+        new.rstrip()
+        + "\n"
+    )
+
+
+def strip_config(
+    cfg,
+    config_text,
+):
+    candidate = cfg[
+        "candidate"
+    ]
+
+    stripped = cfg[
+        "stripped"
+    ]
+
+    try:
+        candidate.write_text(
+            config_text
+        )
+
+        os.chmod(
+            candidate,
+            0o600,
+        )
+
+        result = subprocess.run(
+            [
+                cfg["quick"],
+                "strip",
+                str(candidate),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        if result.returncode != 0:
+            fail(
+                "candidate configuration "
+                "validation failed"
+            )
+
+        stripped.write_text(
+            result.stdout
+        )
+
+        os.chmod(
+            stripped,
+            0o600,
+        )
+
+        return result.stdout
+
+    finally:
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+
+        try:
+            stripped.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def apply_stripped(
+    cfg,
+    stripped_text,
+):
+    path = cfg[
+        "stripped"
+    ]
+
+    try:
+        path.write_text(
+            stripped_text
+        )
+
+        os.chmod(
+            path,
+            0o600,
+        )
+
+        result = subprocess.run(
+            [
+                cfg["tool"],
+                "syncconf",
+                cfg["iface"],
+                str(path),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                "live configuration apply failed"
+            )
+
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def backup_state(
+    provider,
+    cfg,
+    operation,
+):
+    stamp = (
+        datetime.datetime.now(
+            datetime.timezone.utc
+        )
+        .strftime(
+            "%Y%m%dT%H%M%S.%fZ"
+        )
+    )
+
+    root = (
+        pathlib.Path(
+            "/var/lib/vpn-ui/backups"
+        )
+        / provider
+    )
+
+    root.mkdir(
+        parents=True,
+        exist_ok=True,
+        mode=0o700,
+    )
+
+    os.chmod(
+        root,
+        0o700,
+    )
+
+    path = (
+        root
+        / f"{stamp}-{operation}.tar.gz"
+    )
+
+    with tarfile.open(
+        path,
+        "w:gz",
+    ) as tf:
+        tf.add(
+            cfg["config"],
+            arcname="server.conf",
+        )
+
+        tf.add(
+            cfg["inventory"],
+            arcname="inventory",
+        )
+
+    os.chmod(
+        path,
+        0o600,
+    )
+
+    return path
+
+
+def archive_deleted(
+    provider,
+    record,
+):
+    stamp = (
+        datetime.datetime.now(
+            datetime.timezone.utc
+        )
+        .strftime(
+            "%Y%m%dT%H%M%S.%fZ"
+        )
+    )
+
+    root = (
+        pathlib.Path(
+            "/var/lib/vpn-ui/archive"
+        )
+        / provider
+    )
+
+    root.mkdir(
+        parents=True,
+        exist_ok=True,
+        mode=0o700,
+    )
+
+    os.chmod(
+        root,
+        0o700,
+    )
+
+    safe_id = str(
+        record["id"]
+    )
+
+    if not re.fullmatch(
+        r"[A-Za-z0-9_-]+",
+        safe_id,
+    ):
+        fail("invalid inventory id")
+
+    path = (
+        root
+        / f"{stamp}-{safe_id}.json"
+    )
+
+    atomic_json(
+        path,
+        record,
+    )
+
+    return path
+
+
+def restore_record(
+    path,
+    old_bytes,
+):
+    if old_bytes is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    else:
+        atomic_bytes(
+            path,
+            old_bytes,
+            0o600,
+        )
+
+
+def operation_defaults(
+    provider,
+    cfg,
+    records,
+    server,
+):
+    emit(
+        {
+            "ok": True,
+            "provider": provider,
+            "vpn_ip":
+                next_address(
+                    cfg,
+                    records,
+                ),
+            "client_allowed_ips":
+                cfg[
+                    "client_default_allowed"
+                ],
+            "dns_servers":
+                server.get(
+                    "default_dns_servers"
+                )
+                or [],
+            "endpoint":
+                server.get(
+                    "default_endpoint"
+                )
+                or "",
+            "persistent_keepalive":
+                server.get(
+                    "default_persistent_keepalive"
+                )
+                or "",
+        }
+    )
+
+
+def operation_list(
+    provider,
+    records,
+):
+    peers = [
+        summary(
+            item["data"]
+        )
+        for item in records.values()
+    ]
+
+    peers.sort(
+        key=lambda x:
+            str(
+                x.get("name")
+                or ""
+            ).casefold()
+    )
+
+    emit(
+        {
+            "ok": True,
+            "provider": provider,
+            "count": len(peers),
+            "peers": peers,
+        }
+    )
+
+
+def operation_get(
+    provider,
+    records,
+    req,
+):
+    public = require_public_key(
+        req.get("public_key")
+    )
+
+    item = records.get(public)
+
+    if not item:
+        fail("peer not found", 66)
+
+    emit(
+        {
+            "ok": True,
+            "provider": provider,
+            "peer":
+                summary(
+                    item["data"]
+                ),
+        }
+    )
+
+
+def edit_record(
+    cfg,
+    records,
+    old,
+    req,
+):
+    new = copy.deepcopy(
+        old
+    )
+
+    public = old[
+        "public_key"
+    ]
+
+    if "name" in req:
+        new["name"] = clean_name(
+            req["name"]
+        )
+
+    old_ip = (
+        old.get(
+            "allocated_ips"
+        )
+        or [None]
+    )[0]
+
+    if not old_ip:
+        fail(
+            "inventory peer has no VPN address"
+        )
+
+    if "vpn_ip" in req:
+        vpn_ip = client_address(
+            cfg,
+            req["vpn_ip"],
+        )
+    else:
+        vpn_ip = old_ip
+
+    if (
+        "client_allowed_ips"
+        in req
+    ):
+        client_allowed = networks(
+            req[
+                "client_allowed_ips"
+            ]
+        )
+    else:
+        client_allowed = list(
+            old.get(
+                "client_allowed_ips"
+            )
+            or []
+        )
+
+    if not client_allowed:
+        fail(
+            "client AllowedIPs cannot be empty",
+            64,
+        )
+
+    if (
+        "extra_server_allowed_ips"
+        in req
+    ):
+        extra = networks(
+            req[
+                "extra_server_allowed_ips"
+            ],
+            allow_empty=True,
+        )
+
+        if extra is None:
+            extra = []
+    else:
+        extra = record_extra_routes(
+            old
+        )
+
+    server_allowed = [
+        vpn_ip
+    ]
+
+    for value in extra:
+        if value not in server_allowed:
+            server_allowed.append(
+                value
+            )
+
+    if (
+        "persistent_keepalive"
+        in req
+    ):
+        keepalive = keepalive_value(
+            req[
+                "persistent_keepalive"
+            ]
+        )
+
+        if keepalive is None:
+            keepalive = ""
+    else:
+        keepalive = str(
+            old.get(
+                "persistent_keepalive"
+            )
+            or ""
+        )
+
+    ensure_unique(
+        records,
+        new["name"],
+        vpn_ip,
+        exclude_public=public,
+    )
+
+    new[
+        "allocated_ips"
+    ] = [vpn_ip]
+
+    new[
+        "client_allowed_ips"
+    ] = client_allowed
+
+    new[
+        "server_allowed_ips"
+    ] = server_allowed
+
+    new[
+        "extra_allowed_ips"
+    ] = extra
+
+    new[
+        "persistent_keepalive"
+    ] = keepalive
+
+    new[
+        "updated_at"
+    ] = datetime.datetime.now(
+        datetime.timezone.utc
+    ).isoformat()
+
+    return new
+
+
+def write_operation(
+    provider,
+    cfg,
+    server,
+    records,
+    config_text,
+    req,
+):
+    operation = req.get("op")
+
+    assert_write_state(
+        cfg,
+        records,
+        config_text,
+    )
+
+    # Validate the current persistent configuration too.
+    old_stripped = strip_config(
+        cfg,
+        config_text,
+    )
+
+    record_path = None
+    old_record_bytes = None
+    new_record_data = None
+    new_config = config_text
+    delete_record = False
+    deleted_archive = None
+
+    if operation == "create":
+        new_record_data = new_record(
+            provider,
+            cfg,
+            server,
+            config_text,
+            records,
+            req,
+        )
+
+        public = new_record_data[
+            "public_key"
+        ]
+
+        if public in records:
+            fail(
+                "generated public key collision"
+            )
+
+        record_path = (
+            cfg["inventory"]
+            / "clients"
+            / (
+                new_record_data[
+                    "id"
+                ]
+                + ".json"
+            )
+        )
+
+        if record_path.exists():
+            fail(
+                "generated inventory id collision"
+            )
+
+        if new_record_data[
+            "enabled"
+        ]:
+            new_config = append_peer(
+                config_text,
+                provider,
+                new_record_data,
+            )
+
+    else:
+        public = require_public_key(
+            req.get("public_key")
+        )
+
+        item = records.get(
+            public
+        )
+
+        if not item:
+            fail(
+                "peer not found",
+                66,
+            )
+
+        record_path = item[
+            "path"
+        ]
+
+        old_record = item[
+            "data"
+        ]
+
+        old_record_bytes = (
+            record_path.read_bytes()
+        )
+
+        if operation == "edit":
+            new_record_data = edit_record(
+                cfg,
+                records,
+                old_record,
+                req,
+            )
+
+            old_server = (
+                old_record.get(
+                    "server_allowed_ips"
+                )
+                or []
+            )
+
+            new_server = (
+                new_record_data.get(
+                    "server_allowed_ips"
+                )
+                or []
+            )
+
+            old_keepalive = str(
+                old_record.get(
+                    "persistent_keepalive"
+                )
+                or ""
+            )
+
+            new_keepalive = str(
+                new_record_data.get(
+                    "persistent_keepalive"
+                )
+                or ""
+            )
+
+            if (
+                bool(
+                    old_record.get(
+                        "enabled",
+                        True,
+                    )
+                )
+                and (
+                    old_server
+                    != new_server
+                    or old_keepalive
+                    != new_keepalive
+                )
+            ):
+                new_config = replace_peer(
+                    config_text,
+                    provider,
+                    new_record_data,
+                )
+
+        elif operation == "disable":
+            if not bool(
+                old_record.get(
+                    "enabled",
+                    True,
+                )
+            ):
+                new_record_data = copy.deepcopy(
+                    old_record
+                )
+            else:
+                new_record_data = copy.deepcopy(
+                    old_record
+                )
+
+                new_record_data[
+                    "enabled"
+                ] = False
+
+                new_record_data[
+                    "updated_at"
+                ] = datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat()
+
+                new_config = remove_peer(
+                    config_text,
+                    public,
+                )
+
+        elif operation == "enable":
+            if bool(
+                old_record.get(
+                    "enabled",
+                    True,
+                )
+            ):
+                new_record_data = copy.deepcopy(
+                    old_record
+                )
+            else:
+                new_record_data = copy.deepcopy(
+                    old_record
+                )
+
+                new_record_data[
+                    "enabled"
+                ] = True
+
+                new_record_data[
+                    "updated_at"
+                ] = datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat()
+
+                new_config = append_peer(
+                    config_text,
+                    provider,
+                    new_record_data,
+                )
+
+        elif operation == "delete":
+            confirm_name = req.get(
+                "confirm_name"
+            )
+
+            confirm_vpn_ip = req.get(
+                "confirm_vpn_ip"
+            )
+
+            old_addresses = (
+                old_record.get(
+                    "allocated_ips"
+                )
+                or []
+            )
+
+            old_vpn_ip = (
+                old_addresses[0]
+                if old_addresses
+                else ""
+            )
+
+            if (
+                confirm_name
+                != old_record.get("name")
+                or confirm_vpn_ip
+                != old_vpn_ip
+            ):
+                fail(
+                    "delete confirmation "
+                    "does not match peer name/IP",
+                    64,
+                )
+
+            if bool(
+                old_record.get(
+                    "enabled",
+                    True,
+                )
+            ):
+                new_config = remove_peer(
+                    config_text,
+                    public,
+                )
+
+            delete_record = True
+
+        else:
+            fail(
+                "unsupported write operation",
+                64,
+            )
+
+    config_changed = (
+        new_config != config_text
+    )
+
+    if config_changed:
+        new_stripped = strip_config(
+            cfg,
+            new_config,
+        )
+    else:
+        new_stripped = old_stripped
+
+    backup = backup_state(
+        provider,
+        cfg,
+        operation,
+    )
+
+    mutation_started = False
+
+    try:
+        mutation_started = True
+
+        if delete_record:
+            deleted_archive = (
+                archive_deleted(
+                    provider,
+                    records[
+                        public
+                    ]["data"],
+                )
+            )
+
+            record_path.unlink()
+
+        else:
+            atomic_json(
+                record_path,
+                new_record_data,
+            )
+
+        if config_changed:
+            atomic_bytes(
+                cfg["config"],
+                new_config.encode(),
+                0o600,
+            )
+
+        if config_changed:
+            apply_stripped(
+                cfg,
+                new_stripped,
+            )
+
+        after_records = load_records(
+            cfg
+        )
+
+        expected = enabled_public_keys(
+            after_records
+        )
+
+        persistent = config_public_keys(
+            cfg[
+                "config"
+            ].read_text()
+        )
+
+        live = live_public_keys(
+            cfg
+        )
+
+        if expected != persistent:
+            raise RuntimeError(
+                "post-write inventory/config mismatch"
+            )
+
+        if persistent != live:
+            raise RuntimeError(
+                "post-write config/live mismatch"
+            )
+
+    except Exception:
+        rollback_errors = []
+
+        # Roll back inventory independently.  In particular,
+        # create may have written a new inventory record before
+        # the server config write fails.
+        try:
+            restore_record(
+                record_path,
+                old_record_bytes,
+            )
+        except Exception:
+            rollback_errors.append(
+                "inventory"
+            )
+
+        # Do not rewrite the server config if the failed
+        # operation never changed it.  This also permits clean
+        # rollback when /etc is intentionally read-only.
+        try:
+            current_config = (
+                cfg["config"].read_text()
+            )
+
+            if current_config != config_text:
+                atomic_bytes(
+                    cfg["config"],
+                    config_text.encode(),
+                    0o600,
+                )
+        except Exception:
+            rollback_errors.append(
+                "config"
+            )
+
+        # apply_stripped() may itself have partially changed
+        # the live interface before raising, so restoring the
+        # previous live state is an independent rollback step.
+        try:
+            apply_stripped(
+                cfg,
+                old_stripped,
+            )
+        except Exception:
+            rollback_errors.append(
+                "live"
+            )
+
+        if deleted_archive is not None:
+            try:
+                deleted_archive.unlink()
+            except Exception:
+                rollback_errors.append(
+                    "archive"
+                )
+
+        if rollback_errors:
+            fail(
+                "write failed; rollback incomplete: "
+                + ",".join(rollback_errors)
+            )
+
+        fail(
+            "write failed; rollback completed"
+        )
+
+    result_record = None
+
+    if not delete_record:
+        result_record = summary(
+            load_records(cfg)[
+                new_record_data[
+                    "public_key"
+                ]
+            ]["data"]
+        )
+
+    emit(
+        {
+            "ok": True,
+            "provider": provider,
+            "operation": operation,
+            "config_changed":
+                config_changed,
+            "peer": result_record,
+            "backup":
+                backup.name,
+            "deleted_archive":
+                (
+                    deleted_archive.name
+                    if deleted_archive
+                    else None
+                ),
+        }
+    )
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail("provider argument required", 64)
+
+    provider = sys.argv[1]
+
+    if provider not in PROVIDERS:
+        fail("invalid provider", 64)
+
+    cfg = PROVIDERS[
+        provider
+    ]
+
+    lock_path = pathlib.Path(
+        f"/run/lock/vpn-ui-{provider}.lock"
+    )
+
+    lock_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with lock_path.open(
+        "a+"
+    ) as lock:
+        fcntl.flock(
+            lock.fileno(),
+            fcntl.LOCK_EX,
+        )
+
+        req = read_request()
+
+        operation = req.get("op")
+
+        if operation not in {
+            "defaults",
+            "list",
+            "get",
+            "create",
+            "edit",
+            "enable",
+            "disable",
+            "delete",
+        }:
+            fail(
+                "invalid operation",
+                64,
+            )
+
+        server = load_server(
+            cfg
+        )
+
+        records = load_records(
+            cfg
+        )
+
+        if operation == "defaults":
+            operation_defaults(
+                provider,
+                cfg,
+                records,
+                server,
+            )
+            return
+
+        if operation == "list":
+            operation_list(
+                provider,
+                records,
+            )
+            return
+
+        if operation == "get":
+            operation_get(
+                provider,
+                records,
+                req,
+            )
+            return
+
+        config_text = (
+            cfg["config"].read_text()
+        )
+
+        write_operation(
+            provider,
+            cfg,
+            server,
+            records,
+            config_text,
+            req,
+        )
+
+
+if __name__ == "__main__":
+    main()
