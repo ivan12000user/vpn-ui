@@ -28,3 +28,19 @@ Production paths:
 - `/usr/local/bin/vpn-ui-manage-wg`
 - `/usr/local/bin/vpn-ui-manage-awg`
 - `/etc/systemd/system/vpn-ui.service.d/manage-write.conf`
+
+## Current network design
+
+- WireGuard `wg0` uses IPv4-only internal addressing: `10.66.66.0/24`.
+- AmneziaWG `awg0` uses IPv4-only internal addressing: `10.77.77.0/24`.
+- Public IPv6 on the VPS is intentionally preserved for the host and HTTPS/Nginx.
+- The experimental WireGuard ULA `fd66:66:66::/64` is not part of the supported vpn-ui design.
+
+Maintenance helpers:
+
+- `audit-wg-ipv6.sh`
+  - read-only audit used to detect accidental or experimental WireGuard IPv6 state.
+- `cleanup-wg-ipv6.sh`
+  - removes only the experimental live `fd66:66:66::/64` WireGuard address/NAT66 state.
+  - preserves public VPS IPv6, Tailscale IPv6, WireGuard IPv4, AmneziaWG, Nginx and vpn-ui.
+  - does not restart `wg0` or `awg0`.
