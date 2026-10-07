@@ -12,8 +12,12 @@ echo '===== WG IPV6 CLEANUP LAUNCHER ====='
 git diff --check
 
 echo '===== PYTHON SYNTAX CHECK ====='
-python3 -m py_compile deploy/cleanup-wg-ipv6.py
-echo 'PYTHON SYNTAX = PASS'
+python3 - <<'PY'
+from pathlib import Path
+p = Path("deploy/cleanup-wg-ipv6.py")
+compile(p.read_text(), str(p), "exec")
+print("PYTHON SYNTAX = PASS")
+PY
 
 echo '===== RUN GUARDED CLEANUP ON VPS ====='
 ssh "$REMOTE" python3 - < deploy/cleanup-wg-ipv6.py
