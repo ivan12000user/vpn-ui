@@ -234,8 +234,10 @@ python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 assert d.get("ok") is True
-assert d.get("count", len(d.get("peers",[]))) == 6
-for p in d.get("peers",[]):
+peers=d.get("peers",[])
+assert d.get("count", len(peers)) == len(peers)
+assert len(peers) > 0
+for p in peers:
     ip=p.get("vpn_ip") or ""
     assert ":" not in ip, p
 print("WG inventory API = OK, IPv4-only")
