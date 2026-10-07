@@ -111,14 +111,53 @@ print("persistent wg0.conf = IPv4-only")
 print("WG inventory       = IPv4-only")
 PY
 
-# No live peer may still own an IPv6 AllowedIP.
-if wg show wg0 allowed-ips | grep -q ':'; then
-    echo 'ERROR: live WG peer still has IPv6 AllowedIPs; refusing automatic cleanup' >&2
-    wg show wg0 allowed-ips | sed -E 's#^([^[:space:]]+).*#<peer> <IPv6 AllowedIPs present>#' >&2 || true
-    exit 1
-fi
+# Live peer state may still contain the experimental ULA even though
+# persistent config/inventory are already IPv4-only. Allow only that exact
+# experimental network; any unrelated IPv6 AllowedIP is a hard stop.
+wg show wg0 allowed-ips |
+python3 -c '
+import ipaddress, sys
 
-echo 'live WG peers      = IPv4-only'
+experimental = ipaddress.ip_network("fd66:66:66::/64")
+experimental_count = 0
+unexpected = []
+
+for raw in sys.stdin:
+    fields = raw.split(None, 1)
+    if len(fields) < 2:
+        continue
+
+    for value in fields[1].split(","):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            net = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            unexpected.append(value)
+            continue
+
+        if net.version != 6:
+            continue
+
+        if net.subnet_of(experimental):
+            experimental_count += 1
+        else:
+            unexpected.append(value)
+
+if unexpected:
+    print("ERROR: unexpected live WG IPv6 AllowedIPs; refusing automatic cleanup", file=sys.stderr)
+    for value in unexpected:
+        print(f"unexpected IPv6 AllowedIP = {value}", file=sys.stderr)
+    raise SystemExit(1)
+
+if experimental_count:
+    print(f"live WG experimental IPv6 AllowedIPs = {experimental_count}")
+    print("live WG peer state  = will reconcile from persistent IPv4-only config")
+else:
+    print("live WG peers       = IPv4-only")
+'
+
 echo 'precheck           = PASS'
 REMOTE
 
@@ -170,6 +209,209 @@ if (( ${#HANDLES[@]} == 1 )); then
     HAD_NAT=1
     NAT_HANDLE="${HANDLES[0]}"
 fi
+
+HAD_LIVE_IPV6_ALLOWED=0
+if python3 - "$BACKDIR/wg0-allowed-ips.before.txt" <<'PY'
+import ipaddress, pathlib, sys
+
+experimental=ipaddress.ip_network("fd66:66:66::/64")
+for raw in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    fields=raw.split(None, 1)
+    if len(fields) < 2:
+        continue
+    for value in fields[1].split(","):
+        value=value.strip()
+        if not value:
+            continue
+        try:
+            net=ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        if net.version == 6 and net.subnet_of(experimental):
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+then
+    HAD_LIVE_IPV6_ALLOWED=1
+fi
+
+restore_allowed_ips() {
+    while IFS=    rc=$?
+    trap - ERR
+    echo "CLEANUP FAILED rc=$rc — ROLLBACK" >&2
+
+    if (( HAD_LIVE_IPV6_ALLOWED == 1 )); then
+        restore_allowed_ips || true
+    fi
+
+    if (( HAD_ADDR == 1 )); then
+        ip -6 addr show dev wg0 | grep -Fq "$ADDR" ||
+            ip -6 addr add "$ADDR" dev wg0 || true
+    fi
+
+    if (( HAD_NAT == 1 )); then
+        if ! nft -a list chain ip6 nat POSTROUTING 2>/dev/null |
+             grep -F 'ip6 saddr fd66:66:66::/64' |
+             grep -F 'oifname "ens3"' |
+             grep -q 'masquerade'; then
+            nft add rule ip6 nat POSTROUTING                 oifname "ens3" ip6 saddr "$NET" masquerade || true
+        fi
+    fi
+
+    exit "$rc"
+}
+trap rollback ERR
+
+if (( HAD_LIVE_IPV6_ALLOWED == 1 )); then
+    STRIPPED="$(mktemp /run/vpn-ui-wg-cleanup.XXXXXX)"
+    trap 'rm -f "$STRIPPED"' RETURN
+    wg-quick strip /etc/wireguard/wg0.conf >"$STRIPPED"
+    chmod 600 "$STRIPPED"
+    wg syncconf wg0 "$STRIPPED"
+    rm -f "$STRIPPED"
+    trap - RETURN
+fi
+
+if (( HAD_ADDR == 1 )); then
+    ip -6 addr del "$ADDR" dev wg0
+fi
+
+if (( HAD_NAT == 1 )); then
+    nft delete rule ip6 nat POSTROUTING handle "$NAT_HANDLE"
+fi
+
+# Exact cleanup checks.
+if wg show wg0 allowed-ips |
+   python3 -c '
+import ipaddress, sys
+experimental=ipaddress.ip_network("fd66:66:66::/64")
+for raw in sys.stdin:
+    fields=raw.split(None,1)
+    if len(fields)<2:
+        continue
+    for value in fields[1].split(","):
+        value=value.strip()
+        try:
+            net=ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        if net.version == 6 and net.subnet_of(experimental):
+            raise SystemExit(0)
+raise SystemExit(1)
+'; then
+    echo 'ERROR: experimental IPv6 AllowedIPs still present in live WG peers' >&2
+    false
+fi
+
+if ip -6 -o addr show dev wg0 | grep -Fq "$ADDR"; then
+    echo 'ERROR: experimental WG IPv6 address still present' >&2
+    false
+fi
+
+if nft -a list chain ip6 nat POSTROUTING 2>/dev/null |
+   grep -F 'ip6 saddr fd66:66:66::/64' |
+   grep -F 'oifname "ens3"' |
+   grep -q 'masquerade'; then
+    echo 'ERROR: experimental NAT66 rule still present' >&2
+    false
+fi
+
+# Public IPv6 and Tailscale NAT must remain available.
+ip -6 -o addr show dev ens3 scope global | grep -Fq '2a0a:9300:1:104::1/48'
+ip -6 route show default | grep -Fq 'via 2a0a:9300:1::1'
+nft list chain ip6 nat POSTROUTING 2>/dev/null | grep -q 'ts-postrouting'
+
+# VPN services were not restarted.
+systemctl is-active --quiet wg-quick@wg0.service
+systemctl is-active --quiet awg-quick@awg0.service
+systemctl is-active --quiet vpn-ui.service
+systemctl is-active --quiet nginx
+
+trap - ERR
+
+echo "cleanup backup = $BACKDIR"
+echo "reconciled live WG peer IPv6  = $HAD_LIVE_IPV6_ALLOWED"
+echo "removed live wg0 IPv6 address = $HAD_ADDR"
+echo "removed experimental NAT66    = $HAD_NAT"
+REMOTE
+
+echo
+echo '===== VERIFY APPLICATIONS ====='
+ssh "$REMOTE" 'bash -s' <<'REMOTE'
+set -Eeuo pipefail
+
+printf '%s\n' '{"op":"list"}' | /usr/local/bin/vpn-ui-manage-wg |
+python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d.get("ok") is True
+peers=d.get("peers",[])
+assert d.get("count", len(peers)) == len(peers)
+assert len(peers) > 0
+for p in peers:
+    ip=p.get("vpn_ip") or ""
+    assert ":" not in ip, p
+print("WG inventory API = OK, IPv4-only")
+'
+
+printf '%s\n' '{"op":"settings_get"}' | /usr/local/bin/vpn-ui-manage-wg |
+python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d.get("ok") is True
+s=d.get("settings",{})
+assert s.get("client_allowed_ips") == ["10.66.66.0/24"], s
+print("WG UI defaults   = 10.66.66.0/24")
+'
+
+[[ "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/healthz)" == 200 ]]
+[[ "$(curl -k -sS -o /dev/null -w '%{http_code}' https://127.0.0.1/)" == 401 ]]
+
+echo 'vpn-ui health     = OK'
+echo 'nginx auth        = OK'
+REMOTE
+
+echo
+echo '===== VERIFY CORE STATE UNCHANGED ====='
+AFTER="$(capture_state)"
+printf '%s\n' "$AFTER"
+
+if [[ "$AFTER" != "$BEFORE" ]]; then
+    echo 'ERROR: protected VPN/public-IPv6 state changed unexpectedly' >&2
+    diff -u <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") || true
+    exit 1
+fi
+
+echo
+echo '===== FINAL IPV6 STATE ====='
+ssh "$REMOTE" 'bash -s' <<'REMOTE'
+set -Eeuo pipefail
+echo '-- wg0 IPv6 --'
+ip -6 -o addr show dev wg0 || true
+echo '-- experimental NAT66 --'
+nft -a list chain ip6 nat POSTROUTING 2>/dev/null |
+grep -F 'fd66:66:66::/64' || true
+echo '-- public ens3 IPv6 --'
+ip -6 -o addr show dev ens3 scope global
+ip -6 route show default
+REMOTE
+
+echo
+echo '========================================'
+echo 'WG IPV6 CLEANUP = PASS'
+echo 'WG INTERNAL NETWORK = IPv4 ONLY (10.66.66.0/24)'
+echo 'EXPERIMENTAL fd66:66:66::/64 = REMOVED'
+echo 'PUBLIC VPS IPv6 = PRESERVED'
+echo 'TAILSCALE IPv6 = PRESERVED'
+echo 'AWG = UNCHANGED'
+echo 'WG0 / AWG0 = NOT RESTARTED'
+echo 'VPN-UI = HEALTHY AND IPv4-ONLY FOR WG'
+echo '========================================'
+\t' read -r pub allowed; do
+        [[ -n "$pub" && -n "$allowed" ]] || continue
+        wg set wg0 peer "$pub" allowed-ips "$allowed"
+    done <"$BACKDIR/wg0-allowed-ips.before.txt"
+}
 
 rollback() {
     rc=$?
