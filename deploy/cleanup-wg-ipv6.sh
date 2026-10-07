@@ -236,9 +236,20 @@ then
 fi
 
 restore_allowed_ips() {
-    while IFS=    rc=$?
+    while IFS=$'\t' read -r pub allowed; do
+        [[ -n "$pub" && -n "$allowed" ]] || continue
+        wg set wg0 peer "$pub" allowed-ips "$allowed"
+    done <"$BACKDIR/wg0-allowed-ips.before.txt"
+}
+
+rollback() {
+    rc=$?
     trap - ERR
     echo "CLEANUP FAILED rc=$rc — ROLLBACK" >&2
+
+    if [[ -n "${STRIPPED:-}" ]]; then
+        rm -f "$STRIPPED" || true
+    fi
 
     if (( HAD_LIVE_IPV6_ALLOWED == 1 )); then
         restore_allowed_ips || true
@@ -254,7 +265,8 @@ restore_allowed_ips() {
              grep -F 'ip6 saddr fd66:66:66::/64' |
              grep -F 'oifname "ens3"' |
              grep -q 'masquerade'; then
-            nft add rule ip6 nat POSTROUTING                 oifname "ens3" ip6 saddr "$NET" masquerade || true
+            nft add rule ip6 nat POSTROUTING \
+                oifname "ens3" ip6 saddr "$NET" masquerade || true
         fi
     fi
 
@@ -264,12 +276,11 @@ trap rollback ERR
 
 if (( HAD_LIVE_IPV6_ALLOWED == 1 )); then
     STRIPPED="$(mktemp /run/vpn-ui-wg-cleanup.XXXXXX)"
-    trap 'rm -f "$STRIPPED"' RETURN
     wg-quick strip /etc/wireguard/wg0.conf >"$STRIPPED"
     chmod 600 "$STRIPPED"
     wg syncconf wg0 "$STRIPPED"
     rm -f "$STRIPPED"
-    trap - RETURN
+    STRIPPED=''
 fi
 
 if (( HAD_ADDR == 1 )); then
