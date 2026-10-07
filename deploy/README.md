@@ -1,7 +1,7 @@
 # vpn-ui deployment files
 
 This directory contains only the current production artifacts and reusable maintenance tools.
-One-off migration/repair scripts are kept in Git history rather than in the active deployment
+One-off migration/repair and completed legacy-UI cleanup scripts are kept in Git history rather than in the active deployment
 directory.
 
 ## Production artifact mapping
@@ -65,6 +65,7 @@ The verifier is read-only and checks:
 
 - `wg-quick@wg0`, `awg-quick@awg0`, `vpn-ui` and Nginx are active;
 - Nginx configuration is valid;
+- retired UI systemd units, TCP listeners, files and the `awg-web` account/group are absent;
 - inventory, persistent configuration and live peer counts agree;
 - WireGuard inventory/config/live state is IPv4-only;
 - `wg0` has `10.66.66.1/24` and no IPv6 address;

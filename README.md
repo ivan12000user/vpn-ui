@@ -41,7 +41,7 @@ Peer create/edit/enable/disable/delete operations use backups, inventory checks 
 - `deploy/verify-production.sh` — read-only production consistency audit.
 - `deploy/install-local-ca.sh` — private-CA certificate installation/rotation helper.
 
-Historical one-off deployment, repair and IPv6-cleanup scripts are intentionally not kept in
+Historical one-off deployment, repair, IPv6-cleanup and completed legacy-UI cleanup scripts are intentionally not kept in
 the active deployment tree. They remain available in Git history if an old incident needs to
 be reconstructed.
 
@@ -55,3 +55,4 @@ bash deploy/verify-production.sh
 
 The verifier is read-only. It checks service health, inventory/config/live peer consistency,
 the IPv4-only WireGuard design, public VPS IPv6 preservation, UI health and Nginx.
+It also checks that the retired UI services, listeners, files and `awg-web` account/group are absent.
