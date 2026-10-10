@@ -3,6 +3,7 @@ mod geoip;
 mod html_polish;
 mod icon;
 mod settings_manage;
+mod tailscale;
 mod vpn;
 mod web;
 
