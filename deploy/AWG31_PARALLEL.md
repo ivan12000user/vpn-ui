@@ -17,6 +17,14 @@ production service until built and installed after testing.
 - Backups: `/var/lib/vpn-ui/backups/amneziawg31/`
 - Userspace binary: `/usr/local/libexec/amneziawg-go-3.1.20260828`
 - Service: `vpn-ui-awg31.service`
+- Read-only redacted dump: `deploy/libexec/vpn-ui-awg31-status` exposed
+  via `deploy/bin/vpn-ui-awg31-status`; it accepts only `show awg1 dump`.
+- Metadata: `deploy/bin/vpn-ui-awg31-meta` (reads AWG1 inventory).
+- Default read-only settings: `deploy/libexec/vpn-ui-awg31-settings`.
+- Minimal additional sudo permissions:
+  `deploy/sudoers/vpn-ui-awg31` — **never** grant `awg *` or `sudo ALL`.
+- Systemd environment for status wrappers:
+  `deploy/systemd/vpn-ui.service.d/awg31-status.conf`.
 - Web paths: `/amneziawg31`, `/api/amneziawg31/status`,
   `/api/amneziawg31/ping`, `/api/amneziawg31/inventory`,
   `/api/admin/amneziawg31/manage`
@@ -73,6 +81,13 @@ BIN=target/x86_64-unknown-linux-musl/release/vpn-ui
 file "$BIN"
 sha256sum "$BIN"
 ls -lh "$BIN"
+```
+
+Run also:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_awg31_status.py' -v
+python3 -m py_compile deploy/libexec/vpn-ui-awg31-status
 ```
 
 Do not deploy the new binary until these checks pass. Stage it via
