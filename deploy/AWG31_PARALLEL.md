@@ -27,18 +27,33 @@ must match client and server. `RandomTrailers=on` and valid
 `HeaderProtectionKey` are required before vpn-ui creates AWG1 peers.
 The header key is a shared secret; never paste it into chat or commit it.
 
-## Build/parse test, without affecting production
+## Cross-build on Orange Pi 3B (NOT on VPS)
 
-Use a separate git worktree based on `feature/awg31-parallel` and run:
+The development/build host is **OPi3B**, ARM64 (aarch64), with spacious
+storage and passwordless SSH access to the VPS via `new-vps`.
+Production VPS is Debian 12 x86_64 and has limited disk space.
+Do not run cargo, cargo zigbuild, git checkout, or Docker builds on VPS.
+
+Use the existing proven setup on OPi3B:
+- repository `/root/src/vpn-ui`;
+- `/root/.cargo/bin/cargo-zigbuild`;
+- `/usr/local/bin/zig`;
+- Rust target `x86_64-unknown-linux-musl`.
+
+Create a separate worktree on OPi3B, leaving its working branch intact:
 
 ```bash
+cd /root/src/vpn-ui
+git fetch origin feature/awg31-parallel
+git worktree add --detach /root/vpn-ui-awg31-test origin/feature/awg31-parallel
+cd /root/vpn-ui-awg31-test
+
 cargo fmt --check
-cargo test --locked
-cargo build --release --locked
+python3 -m unittest discover -s tests -p 'test_awg31_isolation.py' -v
 python3 - <<'PY'
 import ast
 from pathlib import Path
-for p in list(Path("deploy/libexec").glob("*.py")) + [
+for p in [
     Path("deploy/libexec/vpn-ui-manage"),
     Path("deploy/libexec/vpn-ui-manage-core-v070"),
     Path("deploy/libexec/vpn-ui-awg31-client-config"),
@@ -52,7 +67,18 @@ bash -n deploy/libexec/vpn-ui-awg31-net
 sh -n deploy/bin/vpn-ui-manage-awg31
 sh -n deploy/bin/vpn-ui-awg31-settings
 sh -n deploy/bin/vpn-ui-awg31-client-config
+cargo test --locked
+cargo zigbuild --release --locked --target x86_64-unknown-linux-musl
+BIN=target/x86_64-unknown-linux-musl/release/vpn-ui
+file "$BIN"
+sha256sum "$BIN"
+ls -lh "$BIN"
 ```
+
+Do not deploy the new binary until these checks pass. Stage it via
+`scp "$BIN" new-vps:/tmp/vpn-ui-awg31.candidate` only after preparing
+a verified production backup and release plan. No build artifacts should
+be transferred to or retained on the VPS.
 
 ## Manual deployment checklist (after tests)
 
