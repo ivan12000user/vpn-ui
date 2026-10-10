@@ -633,11 +633,11 @@ fn provider_page(provider_id: &str, status: &InterfaceStatus) -> String {
         .filter(|peer| handshake_status(peer.latest_handshake).0 == "ok")
         .count();
 
-    let peers = if status.peers.is_empty() {
-        r#"<div class="empty">Пиры не найдены.</div>"#.to_string()
-    } else {
-        peer_table(provider_id, &status.peers)
-    };
+    // Always render the table and tbody, even for an initially empty VPN.
+    // Otherwise, JavaScript cannot insert the first peer without reloading.
+    let peers = peer_table(provider_id, &status.peers);
+    let empty_class = if status.peers.is_empty() { "" } else { " hidden" };
+    let table_class = if status.peers.is_empty() { " hidden" } else { "" };
 
     format!(
         r#"
@@ -712,7 +712,10 @@ window.VPN_UI_PROVIDER = "{provider_id}";
 
 <div class="panel">
   <h2>Пиры</h2>
-  {peers}
+  <div id="peers-empty" class="empty{empty_class}">Пиры не найдены.</div>
+  <div id="peers-table" class="peers-table-container{table_class}">
+    {peers}
+  </div>
 </div>
 
 <div
@@ -830,6 +833,8 @@ window.VPN_UI_PROVIDER = "{provider_id}";
         interface = escape_html(&status.interface),
         peer_count = status.peers.len(),
         online_count = online_count,
+        empty_class = empty_class,
+        table_class = table_class,
     )
 }
 
@@ -3621,6 +3626,14 @@ const SCRIPT: &str = r#"
           inventoryData.peers
         );
 
+      // Handle 0 -> 1 and 1 -> 0 peers without a browser reload.
+      // Both containers (including tbody) are rendered server-side.
+      const hasPeers = inventoryData.peers.length > 0;
+      document.getElementById("peers-empty")
+        ?.classList.toggle("hidden", hasPeers);
+      document.getElementById("peers-table")
+        ?.classList.toggle("hidden", !hasPeers);
+
       const peerMap =
         new Map(
           mergedPeers.map(
@@ -3941,4 +3954,56 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
         amneziawg31_active = amneziawg31_active,
         settings_active = settings_active,
     )
+}
+
+#[cfg(test)]
+mod empty_peer_table_tests {
+    use super::*;
+
+    #[test]
+    fn initial_empty_page_keeps_hidden_table_for_first_peer() {
+        let status = InterfaceStatus {
+            provider: "AmneziaWG 3.1".into(),
+            interface: "awg1".into(),
+            public_key: None,
+            listen_port: Some(8444),
+            peers: Vec::new(),
+            error: None,
+        };
+        let page = provider_page("amneziawg31", &status);
+        assert!(page.contains("id=\"peers-empty\" class=\"empty\""));
+        assert!(page.contains("id=\"peers-table\" class=\"peers-table-container hidden\""));
+        assert!(page.contains("<tbody>"), "tbody must exist for dynamic reconciliation");
+        assert!(SCRIPT.contains("const hasPeers = inventoryData.peers.length > 0;"));
+        assert!(SCRIPT.contains("?.classList.toggle(\"hidden\", hasPeers)"));
+        assert!(SCRIPT.contains("?.classList.toggle(\"hidden\", !hasPeers)"));
+    }
+
+    #[test]
+    fn initial_nonempty_page_hides_empty_message() {
+        let status = InterfaceStatus {
+            provider: "AmneziaWG 3.1".into(),
+            interface: "awg1".into(),
+            public_key: None,
+            listen_port: Some(8444),
+            peers: vec![PeerStatus {
+                public_key: "TEST_PEER_PUBLIC_KEY".into(),
+                name: Some("surface-awg31-test".into()),
+                vpn_ip: Some("10.88.88.2".into()),
+                endpoint: None,
+                allowed_ips: "10.88.88.2/32".into(),
+                latest_handshake: None,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                persistent_keepalive: Some(25),
+                geo_provider: None,
+                geo_location: None,
+            }],
+            error: None,
+        };
+        let page = provider_page("amneziawg31", &status);
+        assert!(page.contains("id=\"peers-empty\" class=\"empty hidden\""));
+        assert!(page.contains("id=\"peers-table\" class=\"peers-table-container\""));
+        assert!(page.contains("data-peer-key=\"TEST_PEER_PUBLIC_KEY\""));
+    }
 }
