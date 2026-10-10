@@ -1135,16 +1135,19 @@ def render_peer(provider, record):
             )
         )
 
-        if advanced:
-            for value in advanced:
+        # AWG 3.1 userspace rejects the legacy AdvancedSecurity peer
+        # attribute.  Preserve its original behavior for AWG 2.0.
+        if provider != "amneziawg31":
+            if advanced:
+                for value in advanced:
+                    lines.append(
+                        "AdvancedSecurity = "
+                        + str(value)
+                    )
+            else:
                 lines.append(
-                    "AdvancedSecurity = "
-                    + str(value)
+                    "AdvancedSecurity = off"
                 )
-        else:
-            lines.append(
-                "AdvancedSecurity = off"
-            )
 
         lines.extend(
             safe_option_lines(
