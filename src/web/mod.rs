@@ -2362,6 +2362,36 @@ body.modal-open {
     font-size: 10px;
   }
 }
+
+/* Tailscale rows have no VPN peer public-key; make them mobile cards too. */
+.tailscale-table tr[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 900px) {
+  .tailscale-table tbody tr {
+    display: grid;
+    grid-template-columns: 1fr;
+    padding: 14px;
+    min-width: 0;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--muted);
+    border-radius: 10px;
+  }
+  .tailscale-table tbody tr.status-ok {
+    border-left-color: var(--green);
+  }
+  .tailscale-table tbody tr.status-offline {
+    border-left-color: var(--red);
+  }
+  .tailscale-table tbody td {
+    display: grid;
+    grid-template-columns: minmax(108px, 38%) minmax(0, 1fr);
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
 "#;
 
 const SCRIPT: &str = r#"
