@@ -1,5 +1,6 @@
 use crate::{
     geoip::{GeoIpService, enrich_status},
+    tailscale,
     vpn::{
         amneziawg,
         common::{InterfaceStatus, PeerStatus, PingResult, ProviderConfig, now_epoch, ping_ip},
@@ -61,6 +62,8 @@ pub fn router(state: AppState) -> Router {
         .route("/wireguard", get(wireguard_page))
         .route("/amneziawg", get(amneziawg_page))
         .route("/amneziawg31", get(amneziawg31_page))
+        .route("/tailscale", get(tailscale_page))
+        .route("/api/tailscale/status", get(tailscale_api))
         .route("/settings", get(settings_page))
         .route("/api/admin/auth", get(admin_auth))
         .route("/admin/client", get(crate::admin::client_page))
@@ -117,10 +120,11 @@ async fn admin_auth() -> impl IntoResponse {
 }
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
-    let (wg, awg, awg31) = tokio::join!(
+    let (wg, awg, awg31, ts) = tokio::join!(
         wireguard::status(&state.wireguard),
         amneziawg::status(&state.amneziawg),
-        amneziawg::status(&state.amneziawg31)
+        amneziawg::status(&state.amneziawg31),
+        tailscale::status()
     );
 
     let body = format!(
@@ -132,6 +136,7 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
   {}
   {}
   {}
+  {}
 </div>
 
 <p class="muted">Версия {}.</p>
@@ -139,6 +144,7 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
         dashboard_card("/wireguard", &wg),
         dashboard_card("/amneziawg", &awg),
         dashboard_card("/amneziawg31", &awg31),
+        tailscale_dashboard_card(&ts),
         env!("CARGO_PKG_VERSION")
     );
 
@@ -404,6 +410,111 @@ async fn ping_known_peer(
     };
 
     ping_ip(ping_command, ip).await
+}
+
+
+async fn tailscale_api() -> Json<tailscale::TailStatus> {
+    Json(tailscale::status().await)
+}
+
+async fn tailscale_page() -> impl IntoResponse {
+    let status = tailscale::status().await;
+    Html(layout("Tailscale", &tailscale_page_body(&status)))
+}
+
+fn tailscale_dashboard_card(status: &tailscale::TailStatus) -> String {
+    let available = status.backend_state == "Running" && status.error.is_none();
+    let state_class = if available { "ok" } else { "error" };
+    let state_text = if available { "ONLINE" } else { "UNAVAILABLE" };
+    format!(
+        r#"<a class="card" href="/tailscale">
+          <div class="card-head"><h2>Tailscale</h2><span class="badge {state_class}">{state_text}</span></div>
+          <div class="value">tailscale0</div>
+          <div class="muted mono">{ip}</div>
+          <div class="metric"><strong class="metric-online">{online}</strong> онлайн
+          <span class="metric-separator">/</span><strong>{total}</strong> видимых</div>
+        </a>"#,
+        ip = escape_html(if status.self_ip.is_empty() { "—" } else { &status.self_ip }),
+        online = status.online_count,
+        total = status.peers.len(),
+    )
+}
+
+fn tailscale_rows(status: &tailscale::TailStatus) -> String {
+    let mut rows = String::new();
+    for peer in &status.peers {
+        let state = if peer.online { "ONLINE" } else { "OFFLINE" };
+        let state_class = if peer.online { "ok" } else { "offline" };
+        let traffic = if peer.active { "Активен" } else { "Нет обмена" };
+        let exit = if peer.exit_node_option { "Да" } else { "—" };
+        rows.push_str(&format!(
+            r#"<tr class="status-{state_class}">
+                <td class="peer-name-cell" data-label="Имя"><strong class="peer-name">{name}</strong></td>
+                <td class="mono" data-label="Tailscale IP">{ip}</td>
+                <td data-label="Статус">{state}</td>
+                <td data-label="Обмен">{traffic}</td>
+                <td data-label="Exit-node">{exit}</td>
+                <td data-label="Relay">{relay}</td>
+                <td data-label="Владелец">{owner}</td>
+               </tr>"#,
+            name = escape_html(&peer.hostname),
+            ip = escape_html(&peer.ip),
+            relay = escape_html(if peer.relay.is_empty() { "—" } else { &peer.relay }),
+            owner = escape_html(if peer.owner.is_empty() { "—" } else { &peer.owner }),
+        ));
+    }
+    rows
+}
+
+fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
+    let error = status.error.as_deref().unwrap_or("");
+    let error_html = if error.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<div class="alert error" id="ts-initial-error">{}</div>"#, escape_html(error))
+    };
+    let status_name = if status.backend_state.is_empty() { "—" } else { &status.backend_state };
+    let hostname = if status.self_hostname.is_empty() { "—" } else { &status.self_hostname };
+    let ip = if status.self_ip.is_empty() { "—" } else { &status.self_ip };
+    let exit = if status.self_exit_node_option { "Предлагается" } else { "Нет" };
+    format!(
+        r#"<div class="page-head">
+          <div><h1>Tailscale</h1><p class="lead">Локально видимые участники сети (только просмотр)</p></div>
+          <div class="toolbar">
+            <button id="ts-refresh" class="button" type="button">↻ Обновить</button>
+            <input id="ts-filter" class="filter-input" type="search" placeholder="Поиск..." autocomplete="off">
+            <label class="auto-refresh"><input id="ts-auto" type="checkbox" checked> Автообновление</label>
+            <span id="ts-updated" class="muted">—</span>
+          </div>
+        </div>
+        <div id="ts-error">{error_html}</div>
+        <div class="summary">
+          <div><span>Устройство</span><strong id="ts-self">{hostname}</strong></div>
+          <div><span>Tailscale IP</span><strong id="ts-ip">{ip}</strong></div>
+          <div><span>Видно / онлайн</span><strong id="ts-count">{total} / {online}</strong></div>
+          <div><span>Exit-node / статус</span><strong id="ts-exit">{exit} · {backend}</strong></div>
+        </div>
+        <div class="panel">
+          <h2>Участники Tailscale</h2>
+          <div class="table-wrap tailscale-table">
+            <table>
+              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th></tr></thead>
+              <tbody id="tailscale-rows">{rows}</tbody>
+            </table>
+          </div>
+          <p class="muted" style="margin-top:16px">
+            Показаны только узлы, видимые этому VPS. Список приглашённых пользователей,
+            которым расшарен exit-node, сюда не входит; он требует административных данных Tailscale.
+          </p>
+        </div>"#,
+        hostname = escape_html(hostname),
+        ip = escape_html(ip),
+        total = status.peers.len(),
+        online = status.online_count,
+        exit = exit,
+        backend = escape_html(status_name),
+        rows = tailscale_rows(status),
+    )
 }
 
 fn dashboard_card(path: &str, status: &InterfaceStatus) -> String {
@@ -3910,11 +4021,84 @@ const SCRIPT: &str = r#"
 })();
 "#;
 
+const TAILSCALE_SCRIPT: &str = r#"
+(() => {
+  const tbody = document.getElementById('tailscale-rows');
+  if (!tbody) return;
+  const refresh = document.getElementById('ts-refresh');
+  const auto = document.getElementById('ts-auto');
+  const updated = document.getElementById('ts-updated');
+  const filter = document.getElementById('ts-filter');
+  const errors = document.getElementById('ts-error');
+  let running = false;
+
+  const val = value => value || '—';
+  function cell(row, label, value, css) {
+    const td = document.createElement('td');
+    td.dataset.label = label;
+    if (css) td.className = css;
+    td.textContent = value;
+    row.appendChild(td);
+  }
+  function render(data) {
+    tbody.replaceChildren();
+    for (const peer of (data.peers || [])) {
+      const tr = document.createElement('tr');
+      tr.className = peer.online ? 'status-ok' : 'status-offline';
+      cell(tr, 'Имя', val(peer.hostname), 'peer-name-cell');
+      cell(tr, 'Tailscale IP', val(peer.ip), 'mono');
+      cell(tr, 'Статус', peer.online ? 'ONLINE' : 'OFFLINE');
+      cell(tr, 'Обмен', peer.active ? 'Активен' : 'Нет обмена');
+      cell(tr, 'Exit-node', peer.exit_node_option ? 'Да' : '—');
+      cell(tr, 'Relay', val(peer.relay));
+      cell(tr, 'Владелец', val(peer.owner));
+      tbody.appendChild(tr);
+    }
+    document.getElementById('ts-self').textContent = val(data.self_hostname);
+    document.getElementById('ts-ip').textContent = val(data.self_ip);
+    document.getElementById('ts-count').textContent = (data.peers || []).length + ' / ' + (data.online_count || 0);
+    document.getElementById('ts-exit').textContent =
+      (data.self_exit_node_option ? 'Предлагается' : 'Нет') + ' · ' + val(data.backend_state);
+    errors.textContent = data.error ? 'Не удалось получить Tailscale: ' + data.error : '';
+    errors.className = data.error ? 'alert error' : '';
+    filterRows();
+  }
+  function filterRows() {
+    const query = filter.value.trim().toLocaleLowerCase('ru');
+    for (const tr of tbody.rows) {
+      tr.hidden = query !== '' && !tr.textContent.toLocaleLowerCase('ru').includes(query);
+    }
+  }
+  async function poll() {
+    if (running) return;
+    running = true;
+    refresh.disabled = true;
+    try {
+      const result = await fetch('/api/tailscale/status', {cache:'no-store'});
+      if (!result.ok) throw new Error('HTTP ' + result.status);
+      render(await result.json());
+      updated.textContent = 'Обновлено ' + new Date().toLocaleTimeString();
+    } catch (e) {
+      updated.textContent = 'Нет связи';
+      errors.textContent = String(e);
+      errors.className = 'alert error';
+    } finally {
+      refresh.disabled = false;
+      running = false;
+    }
+  }
+  refresh.addEventListener('click', poll);
+  filter.addEventListener('input', filterRows);
+  setInterval(() => { if (auto.checked && !document.hidden) poll(); }, 15000);
+})();
+"#;
+
 pub(crate) fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
     let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
     let amneziawg31_active = if title == "AmneziaWG 3.1" { " active" } else { "" };
+    let tailscale_active = if title == "Tailscale" { " active" } else { "" };
     let settings_active = if title == "Настройки" {
         " active"
     } else {
@@ -3938,20 +4122,24 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
   <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
   <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
   <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
+  <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
   <a class="nav-link{settings_active}" href="/settings">Настройки</a>
 </nav>
 <main>{body}</main>
 </div>
 <script>{script}</script>
+<script>{tailscale_script}</script>
 </body>
 </html>"#,
         title = escape_html(title),
         style = STYLE,
         script = SCRIPT,
+        tailscale_script = TAILSCALE_SCRIPT,
         overview_active = overview_active,
         wireguard_active = wireguard_active,
         amneziawg_active = amneziawg_active,
         amneziawg31_active = amneziawg31_active,
+        tailscale_active = tailscale_active,
         settings_active = settings_active,
     )
 }
