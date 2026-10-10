@@ -27,6 +27,10 @@ PROVIDERS = {
         "inventory": pathlib.Path("/var/lib/vpn-ui/secure/amneziawg"),
         "client_default_allowed": ["10.77.77.0/24"],
     },
+    "amneziawg31": {
+        "inventory": pathlib.Path("/var/lib/vpn-ui/secure/amneziawg31"),
+        "client_default_allowed": ["10.88.88.0/24"],
+    },
 }
 
 

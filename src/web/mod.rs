@@ -20,15 +20,19 @@ use tokio::process::Command;
 pub struct AppState {
     pub wireguard: ProviderConfig,
     pub amneziawg: ProviderConfig,
+    pub amneziawg31: ProviderConfig,
     pub ping_command: String,
     pub wg_settings_command: String,
     pub awg_settings_command: String,
+    pub awg31_settings_command: String,
 
     pub wg_client_config_command: String,
     pub awg_client_config_command: String,
+    pub awg31_client_config_command: String,
 
     pub wg_manage_command: String,
     pub awg_manage_command: String,
+    pub awg31_manage_command: String,
 
     pub geoip: GeoIpService,
 }
@@ -56,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(dashboard))
         .route("/wireguard", get(wireguard_page))
         .route("/amneziawg", get(amneziawg_page))
+        .route("/amneziawg31", get(amneziawg31_page))
         .route("/settings", get(settings_page))
         .route("/api/admin/auth", get(admin_auth))
         .route("/admin/client", get(crate::admin::client_page))
@@ -72,11 +77,18 @@ pub fn router(state: AppState) -> Router {
             post(crate::admin::amneziawg_manage),
         )
         .route("/api/wireguard/inventory", get(wireguard_inventory))
+        .route(
+            "/api/admin/amneziawg31/manage",
+            post(crate::admin::amneziawg31_manage),
+        )
         .route("/api/amneziawg/inventory", get(amneziawg_inventory))
+        .route("/api/amneziawg31/inventory", get(amneziawg31_inventory))
         .route("/api/wireguard/status", get(wireguard_api))
         .route("/api/amneziawg/status", get(amneziawg_api))
+        .route("/api/amneziawg31/status", get(amneziawg31_api))
         .route("/api/wireguard/ping", post(wireguard_ping))
         .route("/api/amneziawg/ping", post(amneziawg_ping))
+        .route("/api/amneziawg31/ping", post(amneziawg31_ping))
         .route("/healthz", get(health))
         .with_state(state)
 }
@@ -105,9 +117,10 @@ async fn admin_auth() -> impl IntoResponse {
 }
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
-    let (wg, awg) = tokio::join!(
+    let (wg, awg, awg31) = tokio::join!(
         wireguard::status(&state.wireguard),
-        amneziawg::status(&state.amneziawg)
+        amneziawg::status(&state.amneziawg),
+        amneziawg::status(&state.amneziawg31)
     );
 
     let body = format!(
@@ -118,12 +131,14 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
 <div class="cards">
   {}
   {}
+  {}
 </div>
 
 <p class="muted">Версия {}.</p>
 "#,
         dashboard_card("/wireguard", &wg),
         dashboard_card("/amneziawg", &awg),
+        dashboard_card("/amneziawg31", &awg31),
         env!("CARGO_PKG_VERSION")
     );
 
@@ -142,12 +157,22 @@ async fn amneziawg_page(State(state): State<AppState>) -> impl IntoResponse {
     Html(layout("AmneziaWG", &provider_page("amneziawg", &status)))
 }
 
+async fn amneziawg31_page(State(state): State<AppState>) -> impl IntoResponse {
+    let mut status = amneziawg::status(&state.amneziawg31).await;
+    enrich_status(&state.geoip, &mut status).await;
+    Html(layout("AmneziaWG 3.1", &provider_page("amneziawg31", &status)))
+}
+
 async fn wireguard_inventory(State(state): State<AppState>) -> impl IntoResponse {
     inventory_api(&state.wg_manage_command).await
 }
 
 async fn amneziawg_inventory(State(state): State<AppState>) -> impl IntoResponse {
     inventory_api(&state.awg_manage_command).await
+}
+
+async fn amneziawg31_inventory(State(state): State<AppState>) -> impl IntoResponse {
+    inventory_api(&state.awg31_manage_command).await
 }
 
 async fn inventory_api(command: &str) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
@@ -319,6 +344,12 @@ async fn amneziawg_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
     Json(status)
 }
 
+async fn amneziawg31_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
+    let mut status = amneziawg::status(&state.amneziawg31).await;
+    enrich_status(&state.geoip, &mut status).await;
+    Json(status)
+}
+
 async fn wireguard_ping(
     State(state): State<AppState>,
     Json(request): Json<PingRequest>,
@@ -332,6 +363,14 @@ async fn amneziawg_ping(
     Json(request): Json<PingRequest>,
 ) -> Json<PingResult> {
     let status = amneziawg::status(&state.amneziawg).await;
+    Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
+}
+
+async fn amneziawg31_ping(
+    State(state): State<AppState>,
+    Json(request): Json<PingRequest>,
+) -> Json<PingResult> {
+    let status = amneziawg::status(&state.amneziawg31).await;
     Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
 }
 
@@ -594,11 +633,11 @@ fn provider_page(provider_id: &str, status: &InterfaceStatus) -> String {
         .filter(|peer| handshake_status(peer.latest_handshake).0 == "ok")
         .count();
 
-    let peers = if status.peers.is_empty() {
-        r#"<div class="empty">Пиры не найдены.</div>"#.to_string()
-    } else {
-        peer_table(provider_id, &status.peers)
-    };
+    // Always render the table and tbody, even for an initially empty VPN.
+    // Otherwise, JavaScript cannot insert the first peer without reloading.
+    let peers = peer_table(provider_id, &status.peers);
+    let empty_class = if status.peers.is_empty() { "" } else { " hidden" };
+    let table_class = if status.peers.is_empty() { " hidden" } else { "" };
 
     format!(
         r#"
@@ -673,7 +712,10 @@ window.VPN_UI_PROVIDER = "{provider_id}";
 
 <div class="panel">
   <h2>Пиры</h2>
-  {peers}
+  <div id="peers-empty" class="empty{empty_class}">Пиры не найдены.</div>
+  <div id="peers-table" class="peers-table-container{table_class}">
+    {peers}
+  </div>
 </div>
 
 <div
@@ -791,6 +833,8 @@ window.VPN_UI_PROVIDER = "{provider_id}";
         interface = escape_html(&status.interface),
         peer_count = status.peers.len(),
         online_count = online_count,
+        empty_class = empty_class,
+        table_class = table_class,
     )
 }
 
@@ -3582,6 +3626,14 @@ const SCRIPT: &str = r#"
           inventoryData.peers
         );
 
+      // Handle 0 -> 1 and 1 -> 0 peers without a browser reload.
+      // Both containers (including tbody) are rendered server-side.
+      const hasPeers = inventoryData.peers.length > 0;
+      document.getElementById("peers-empty")
+        ?.classList.toggle("hidden", hasPeers);
+      document.getElementById("peers-table")
+        ?.classList.toggle("hidden", !hasPeers);
+
       const peerMap =
         new Map(
           mergedPeers.map(
@@ -3862,6 +3914,7 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
     let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
+    let amneziawg31_active = if title == "AmneziaWG 3.1" { " active" } else { "" };
     let settings_active = if title == "Настройки" {
         " active"
     } else {
@@ -3883,7 +3936,8 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
   <div class="brand">VPN UI</div>
   <a class="nav-link{overview_active}" href="/">Обзор</a>
   <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-  <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG</a>
+  <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
+  <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
   <a class="nav-link{settings_active}" href="/settings">Настройки</a>
 </nav>
 <main>{body}</main>
@@ -3897,6 +3951,59 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
         overview_active = overview_active,
         wireguard_active = wireguard_active,
         amneziawg_active = amneziawg_active,
+        amneziawg31_active = amneziawg31_active,
         settings_active = settings_active,
     )
+}
+
+#[cfg(test)]
+mod empty_peer_table_tests {
+    use super::*;
+
+    #[test]
+    fn initial_empty_page_keeps_hidden_table_for_first_peer() {
+        let status = InterfaceStatus {
+            provider: "AmneziaWG 3.1".into(),
+            interface: "awg1".into(),
+            public_key: None,
+            listen_port: Some(8444),
+            peers: Vec::new(),
+            error: None,
+        };
+        let page = provider_page("amneziawg31", &status);
+        assert!(page.contains("id=\"peers-empty\" class=\"empty\""));
+        assert!(page.contains("id=\"peers-table\" class=\"peers-table-container hidden\""));
+        assert!(page.contains("<tbody>"), "tbody must exist for dynamic reconciliation");
+        assert!(SCRIPT.contains("const hasPeers = inventoryData.peers.length > 0;"));
+        assert!(SCRIPT.contains("?.classList.toggle(\"hidden\", hasPeers)"));
+        assert!(SCRIPT.contains("?.classList.toggle(\"hidden\", !hasPeers)"));
+    }
+
+    #[test]
+    fn initial_nonempty_page_hides_empty_message() {
+        let status = InterfaceStatus {
+            provider: "AmneziaWG 3.1".into(),
+            interface: "awg1".into(),
+            public_key: None,
+            listen_port: Some(8444),
+            peers: vec![PeerStatus {
+                public_key: "TEST_PEER_PUBLIC_KEY".into(),
+                name: Some("surface-awg31-test".into()),
+                vpn_ip: Some("10.88.88.2".into()),
+                endpoint: None,
+                allowed_ips: "10.88.88.2/32".into(),
+                latest_handshake: None,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                persistent_keepalive: Some(25),
+                geo_provider: None,
+                geo_location: None,
+            }],
+            error: None,
+        };
+        let page = provider_page("amneziawg31", &status);
+        assert!(page.contains("id=\"peers-empty\" class=\"empty hidden\""));
+        assert!(page.contains("id=\"peers-table\" class=\"peers-table-container\""));
+        assert!(page.contains("data-peer-key=\"TEST_PEER_PUBLIC_KEY\""));
+    }
 }

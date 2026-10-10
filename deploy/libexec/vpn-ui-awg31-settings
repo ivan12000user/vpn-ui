@@ -1,0 +1,38 @@
+#!/usr/bin/python3
+"""Read-only, redacted AWG 3.1 interface settings for vpn-ui."""
+import pathlib
+import sys
+
+FILE = pathlib.Path("/etc/amnezia/amneziawg/awg1.conf")
+KEYS = {
+    "Address", "ListenPort", "MTU", "Table",
+    "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
+    "H1", "H2", "H3", "H4",
+    "ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout",
+    "RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts",
+    "RandomTrailers", "DisableCookies",
+}
+try:
+    content = FILE.read_text()
+except OSError:
+    print("AWG1 configuration unavailable", file=sys.stderr)
+    sys.exit(1)
+in_iface = False
+key_set = False
+for raw in content.splitlines():
+    line = raw.strip()
+    if line == "[Interface]":
+        in_iface = True
+        continue
+    if line.startswith("["):
+        in_iface = False
+    if not in_iface or "=" not in line:
+        continue
+    key, value = (p.strip() for p in line.split("=", 1))
+    if key == "HeaderProtectionKey":
+        key_set = bool(value)
+    elif key in KEYS:
+        # Never copy credentials, secrets or multiline content into UI.
+        if value and not any(c in value for c in "\r\n\t"):
+            print(f"{key}\t{value}")
+print("HeaderProtection\t" + ("configured" if key_set else "disabled"))

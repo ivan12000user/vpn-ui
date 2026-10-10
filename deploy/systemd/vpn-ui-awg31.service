@@ -1,0 +1,18 @@
+[Unit]
+Description=Isolated AmneziaWG 3.1 userspace awg1
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/amnezia/amneziawg/awg1.conf
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/libexec/amneziawg-go-3.1.20260828 -f awg1
+ExecStartPost=/usr/local/libexec/vpn-ui-awg31-net up
+ExecStopPost=/usr/local/libexec/vpn-ui-awg31-net down
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
