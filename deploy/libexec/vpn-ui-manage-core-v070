@@ -64,6 +64,18 @@ PROVIDERS = {
             "/run/vpnuiawg.sync"
         ),
     },
+    "amneziawg31": {
+        "short": "awg31",
+        "iface": "awg1",
+        "tool": "/usr/bin/awg",
+        "quick": "/usr/bin/awg-quick",
+        "config": pathlib.Path("/etc/amnezia/amneziawg/awg1.conf"),
+        "inventory": pathlib.Path("/var/lib/vpn-ui/secure/amneziawg31"),
+        "network": ipaddress.ip_network("10.88.88.0/24"),
+        "client_default_allowed": ["10.88.88.0/24"],
+        "candidate": pathlib.Path("/run/vpnuiawg31.conf"),
+        "stripped": pathlib.Path("/run/vpnuiawg31.sync"),
+    },
 }
 
 
@@ -760,6 +772,32 @@ AWG_CLIENT_KEYS = [
     "H4",
 ]
 
+# AWG 3.1 parameters shared by a server and its clients.
+# HeaderProtectionKey must remain secret, outside public inventory APIs.
+AWG31_OPTIONAL_CLIENT_KEYS = [
+    "ContentPaddingAddition",
+    "RekeyAfterTime",
+    "RekeyTimeout",
+    "RejectAfterTime",
+    "KeepaliveTimeout",
+    "MaxHandshakeAttempts",
+    "DisableCookies",
+]
+
+
+def require_awg31_parameters(values):
+    hp = values.get("HeaderProtectionKey", [])
+    trailer = values.get("RandomTrailers", [])
+    if len(hp) != 1 or not valid_public_key(hp[0]):
+        fail("AWG 3.1 requires a valid 32-byte HeaderProtectionKey")
+    if trailer != ["on"]:
+        fail("AWG 3.1 requires RandomTrailers = on")
+    for name in ("S1", "S2", "S3", "S4"):
+        raw = values.get(name, [])
+        if len(raw) != 1 or not raw[0].isdigit() or int(raw[0]) < 12:
+            fail(f"AWG 3.1 requires {name} >= 12")
+
+
 
 def new_record(
     provider,
@@ -846,11 +884,11 @@ def new_record(
         datetime.timezone.utc
     ).isoformat()
 
-    prefix = (
-        "wg"
-        if provider == "wireguard"
-        else "awg"
-    )
+    prefix = {
+        "wireguard": "wg",
+        "amneziawg": "awg",
+        "amneziawg31": "awg31",
+    }[provider]
 
     peer_id = (
         prefix
@@ -923,9 +961,17 @@ def new_record(
                 vals
             )
 
+        if provider == "amneziawg31":
+            require_awg31_parameters(values)
+            options["HeaderProtectionKey"] = list(values["HeaderProtectionKey"])
+            options["RandomTrailers"] = ["on"]
+            for key in AWG31_OPTIONAL_CLIENT_KEYS:
+                if key in values:
+                    options[key] = list(values[key])
+
         record = {
             "schema": 1,
-            "provider": "amneziawg",
+            "provider": provider,
             "id": peer_id,
             "name": name,
             "enabled": enabled,
