@@ -56,3 +56,21 @@ bash deploy/verify-production.sh
 The verifier is read-only. It checks service health, inventory/config/live peer consistency,
 the IPv4-only WireGuard design, public VPS IPv6 preservation, UI health and Nginx.
 It also checks that the retired UI services, listeners, files and `awg-web` account/group are absent.
+
+
+## Experimental AWG 3.1 (awg1)
+
+Branch `feature/awg31-parallel` adds a third independent UI provider:
+AmneziaWG 3.1 `awg1` on `10.88.88.0/24` (UDP 8444).
+It is **not yet installed on production**.
+
+The existing `wg0` and `awg0` stay unchanged. Peer CRUD, status,
+ping, inventory, client configuration and QR export use separate AWG1
+paths and a userspace `amneziawg-go-3.1.20260828` service.
+
+**Run offline tests and build before installing this branch.**
+Detailed deployment and rollback plan:
+[AWG31_PARALLEL.md](deploy/AWG31_PARALLEL.md).
+
+When legacy `awg0` is eventually retired, `awg1` can stay named
+`awg1` and be shown as the primary AmneziaWG protocol.
