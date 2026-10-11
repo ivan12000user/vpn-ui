@@ -43,6 +43,9 @@ jobs:
       - name: Build release executable
         run: cargo +1.98.0 build --release --locked
 
+      - name: Stage installation safely in disposable filesystem
+        run: python3 tests/stage_deployment.py
+
       - name: Test isolated AWG 3.1 helpers
         run: python3 -m unittest discover -s tests -p 'test_awg31_*.py' -v
 
