@@ -49,6 +49,9 @@ jobs:
       - name: Test WG/AWG 2.0 profile generators and privilege boundaries
         run: python3 -m unittest discover -s tests -p 'test_client_config_helpers.py' -v
 
+      - name: Validate read-only wrappers and sudoers
+        run: python3 -m unittest discover -s tests -p 'test_readonly_deployment.py' -v
+
       - name: Check helper syntax
         run: |
           set -eu
