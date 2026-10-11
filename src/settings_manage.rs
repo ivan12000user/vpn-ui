@@ -183,8 +183,14 @@ async fn settings_interfaces_page(State(state): State<AppState>) -> impl IntoRes
         ("Address", "Адрес интерфейса"),
         ("ListenPort", "UDP порт"),
         ("MTU", "MTU"),
-        ("S1", "S1"), ("S2", "S2"), ("S3", "S3"), ("S4", "S4"),
-        ("H1", "H1"), ("H2", "H2"), ("H3", "H3"), ("H4", "H4"),
+        ("S1", "S1"),
+        ("S2", "S2"),
+        ("S3", "S3"),
+        ("S4", "S4"),
+        ("H1", "H1"),
+        ("H2", "H2"),
+        ("H3", "H3"),
+        ("H4", "H4"),
         ("HeaderProtection", "Header Protection"),
         ("RandomTrailers", "Random Trailers"),
         ("DisableCookies", "Disable Cookies"),
@@ -233,8 +239,18 @@ async fn settings_interfaces_page(State(state): State<AppState>) -> impl IntoRes
 </style>
 "#,
         wg = interface_settings_panel("WireGuard", &state.wireguard.interface, &wg, &wg_fields,),
-        awg = interface_settings_panel("AmneziaWG 2.0", &state.amneziawg.interface, &awg, &awg_fields,),
-        awg31 = interface_settings_panel("AmneziaWG 3.1", &state.amneziawg31.interface, &awg31, &awg31_fields,),
+        awg = interface_settings_panel(
+            "AmneziaWG 2.0",
+            &state.amneziawg.interface,
+            &awg,
+            &awg_fields,
+        ),
+        awg31 = interface_settings_panel(
+            "AmneziaWG 3.1",
+            &state.amneziawg31.interface,
+            &awg31,
+            &awg31_fields,
+        ),
     );
 
     Html(layout("Настройки", &body))

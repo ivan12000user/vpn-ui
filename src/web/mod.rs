@@ -166,7 +166,10 @@ async fn amneziawg_page(State(state): State<AppState>) -> impl IntoResponse {
 async fn amneziawg31_page(State(state): State<AppState>) -> impl IntoResponse {
     let mut status = amneziawg::status(&state.amneziawg31).await;
     enrich_status(&state.geoip, &mut status).await;
-    Html(layout("AmneziaWG 3.1", &provider_page("amneziawg31", &status)))
+    Html(layout(
+        "AmneziaWG 3.1",
+        &provider_page("amneziawg31", &status),
+    ))
 }
 
 async fn wireguard_inventory(State(state): State<AppState>) -> impl IntoResponse {
@@ -412,7 +415,6 @@ async fn ping_known_peer(
     ping_ip(ping_command, ip).await
 }
 
-
 async fn tailscale_api() -> Json<tailscale::TailStatus> {
     Json(tailscale::status().await)
 }
@@ -434,7 +436,11 @@ fn tailscale_dashboard_card(status: &tailscale::TailStatus) -> String {
           <div class="metric"><strong class="metric-online">{online}</strong> онлайн
           <span class="metric-separator">/</span><strong>{total}</strong> видимых</div>
         </a>"#,
-        ip = escape_html(if status.self_ip.is_empty() { "—" } else { &status.self_ip }),
+        ip = escape_html(if status.self_ip.is_empty() {
+            "—"
+        } else {
+            &status.self_ip
+        }),
         online = status.online_count,
         total = status.peers.len(),
     )
@@ -445,7 +451,11 @@ fn tailscale_rows(status: &tailscale::TailStatus) -> String {
     for peer in &status.peers {
         let state = if peer.online { "ONLINE" } else { "OFFLINE" };
         let state_class = if peer.online { "ok" } else { "offline" };
-        let traffic = if peer.active { "Активен" } else { "Нет обмена" };
+        let traffic = if peer.active {
+            "Активен"
+        } else {
+            "Нет обмена"
+        };
         let exit = if peer.exit_node_option { "Да" } else { "—" };
         rows.push_str(&format!(
             r#"<tr class="status-{state_class}">
@@ -471,12 +481,31 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
     let error_html = if error.is_empty() {
         String::new()
     } else {
-        format!(r#"<div class="alert error" id="ts-initial-error">{}</div>"#, escape_html(error))
+        format!(
+            r#"<div class="alert error" id="ts-initial-error">{}</div>"#,
+            escape_html(error)
+        )
     };
-    let status_name = if status.backend_state.is_empty() { "—" } else { &status.backend_state };
-    let hostname = if status.self_hostname.is_empty() { "—" } else { &status.self_hostname };
-    let ip = if status.self_ip.is_empty() { "—" } else { &status.self_ip };
-    let exit = if status.self_exit_node_option { "Предлагается" } else { "Нет" };
+    let status_name = if status.backend_state.is_empty() {
+        "—"
+    } else {
+        &status.backend_state
+    };
+    let hostname = if status.self_hostname.is_empty() {
+        "—"
+    } else {
+        &status.self_hostname
+    };
+    let ip = if status.self_ip.is_empty() {
+        "—"
+    } else {
+        &status.self_ip
+    };
+    let exit = if status.self_exit_node_option {
+        "Предлагается"
+    } else {
+        "Нет"
+    };
     format!(
         r#"<div class="page-head">
           <div><h1>Tailscale</h1><p class="lead">Локально видимые участники сети (только просмотр)</p></div>
@@ -747,8 +776,16 @@ fn provider_page(provider_id: &str, status: &InterfaceStatus) -> String {
     // Always render the table and tbody, even for an initially empty VPN.
     // Otherwise, JavaScript cannot insert the first peer without reloading.
     let peers = peer_table(provider_id, &status.peers);
-    let empty_class = if status.peers.is_empty() { "" } else { " hidden" };
-    let table_class = if status.peers.is_empty() { " hidden" } else { "" };
+    let empty_class = if status.peers.is_empty() {
+        ""
+    } else {
+        " hidden"
+    };
+    let table_class = if status.peers.is_empty() {
+        " hidden"
+    } else {
+        ""
+    };
 
     format!(
         r#"
@@ -4127,7 +4164,11 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
     let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
-    let amneziawg31_active = if title == "AmneziaWG 3.1" { " active" } else { "" };
+    let amneziawg31_active = if title == "AmneziaWG 3.1" {
+        " active"
+    } else {
+        ""
+    };
     let tailscale_active = if title == "Tailscale" { " active" } else { "" };
     let settings_active = if title == "Настройки" {
         " active"
@@ -4191,7 +4232,10 @@ mod empty_peer_table_tests {
         let page = provider_page("amneziawg31", &status);
         assert!(page.contains("id=\"peers-empty\" class=\"empty\""));
         assert!(page.contains("id=\"peers-table\" class=\"peers-table-container hidden\""));
-        assert!(page.contains("<tbody>"), "tbody must exist for dynamic reconciliation");
+        assert!(
+            page.contains("<tbody>"),
+            "tbody must exist for dynamic reconciliation"
+        );
         assert!(SCRIPT.contains("const hasPeers = inventoryData.peers.length > 0;"));
         assert!(SCRIPT.contains("?.classList.toggle(\"hidden\", hasPeers)"));
         assert!(SCRIPT.contains("?.classList.toggle(\"hidden\", !hasPeers)"));

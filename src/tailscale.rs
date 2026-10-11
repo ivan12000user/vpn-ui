@@ -43,20 +43,29 @@ fn bool_field(v: &Value, field: &str) -> bool {
 fn ipv4(v: &Value) -> String {
     v.get("TailscaleIPs")
         .and_then(Value::as_array)
-        .and_then(|xs| xs.iter().filter_map(Value::as_str).find(|s| !s.contains(':')))
+        .and_then(|xs| {
+            xs.iter()
+                .filter_map(Value::as_str)
+                .find(|s| !s.contains(':'))
+        })
         .unwrap_or_default()
         .to_owned()
 }
 
 fn parse_status(input: &[u8]) -> Result<TailStatus, String> {
-    let doc: Value = serde_json::from_slice(input).map_err(|e| format!("Invalid Tailscale JSON: {e}"))?;
+    let doc: Value =
+        serde_json::from_slice(input).map_err(|e| format!("Invalid Tailscale JSON: {e}"))?;
     let self_node = doc.get("Self").unwrap_or(&Value::Null);
     let users = doc.get("User").and_then(Value::as_object);
     let mut peers = Vec::new();
 
     if let Some(map) = doc.get("Peer").and_then(Value::as_object) {
         for v in map.values() {
-            let uid = v.get("UserID").and_then(Value::as_i64).map(|x| x.to_string()).unwrap_or_default();
+            let uid = v
+                .get("UserID")
+                .and_then(Value::as_i64)
+                .map(|x| x.to_string())
+                .unwrap_or_default();
             let owner = users
                 .and_then(|u| u.get(&uid))
                 .map(|u| text_field(u, "LoginName"))
@@ -76,7 +85,8 @@ fn parse_status(input: &[u8]) -> Result<TailStatus, String> {
     }
 
     peers.sort_by(|a, b| {
-        b.online.cmp(&a.online)
+        b.online
+            .cmp(&a.online)
             .then_with(|| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()))
     });
     let online_count = peers.iter().filter(|p| p.online).count();
@@ -102,19 +112,31 @@ pub async fn status() -> TailStatus {
     command.args(["status", "--json"]).kill_on_drop(true);
     let result = tokio::time::timeout(Duration::from_secs(7), command.output()).await;
     match result {
-        Err(_) => TailStatus { error: Some("Tailscale status timed out".to_owned()), ..Default::default() },
-        Ok(Err(err)) => TailStatus { error: Some(format!("Tailscale status unavailable: {err}")), ..Default::default() },
+        Err(_) => TailStatus {
+            error: Some("Tailscale status timed out".to_owned()),
+            ..Default::default()
+        },
+        Ok(Err(err)) => TailStatus {
+            error: Some(format!("Tailscale status unavailable: {err}")),
+            ..Default::default()
+        },
         Ok(Ok(out)) if !out.status.success() => {
             let message = String::from_utf8_lossy(&out.stderr);
             TailStatus {
-                error: Some(format!("Tailscale status error: {}", message.chars().take(240).collect::<String>())),
+                error: Some(format!(
+                    "Tailscale status error: {}",
+                    message.chars().take(240).collect::<String>()
+                )),
                 ..Default::default()
             }
         }
         Ok(Ok(out)) => match parse_status(&out.stdout) {
             Ok(status) => status,
-            Err(error) => TailStatus { error: Some(error), ..Default::default() },
-        }
+            Err(error) => TailStatus {
+                error: Some(error),
+                ..Default::default()
+            },
+        },
     }
 }
 
@@ -147,7 +169,8 @@ mod tests {
 
     #[test]
     fn missing_optional_fields_do_not_invent_online_state() {
-        let s = parse_status(br#"{"BackendState":"Running","Peer":{"x":{"HostName":"unknown"}}}"#).unwrap();
+        let s = parse_status(br#"{"BackendState":"Running","Peer":{"x":{"HostName":"unknown"}}}"#)
+            .unwrap();
         assert_eq!(s.peers.len(), 1);
         assert!(!s.peers[0].online);
         assert!(!s.peers[0].active);
