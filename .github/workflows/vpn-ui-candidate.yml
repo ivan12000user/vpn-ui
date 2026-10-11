@@ -46,6 +46,9 @@ jobs:
       - name: Test isolated AWG 3.1 helpers
         run: python3 -m unittest discover -s tests -p 'test_awg31_*.py' -v
 
+      - name: Test WG/AWG 2.0 profile generators and privilege boundaries
+        run: python3 -m unittest discover -s tests -p 'test_client_config_helpers.py' -v
+
       - name: Check helper syntax
         run: |
           set -eu
