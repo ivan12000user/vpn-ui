@@ -69,7 +69,9 @@ For the AWG 3.1 offline Python regression tests, also run the `tests/test_awg31_
 
 The AWG 3.1 engine `amneziawg-go-3.1.20260828` is an **external deployment prerequisite**, not bundled in this repository. Confirm provenance, licensing and its verified checksum before provisioning; do not copy production private keys into source control.
 
-The shared WG/AWG 2.0 client-profile generator, its two command wrappers and the read-only privileged helper are now packaged in this repository, with executable modes and offline tests. The imported scripts are exact copies of the audited production versions. **A complete disaster-recovery deployment is not yet established:** service permissions, sudoers for all providers, external AWG 3.1 binary provenance, configuration templates and a clean installation rehearsal still need verification.
+The shared WG/AWG 2.0 client-profile generator, privileged read-only helper, ten WG/AWG 2.0 command wrappers and the active sudoers policies for all three providers are now tracked, with verified file hashes, offline regression tests and sudoers syntax checks. Historical backup sudoers were excluded. **A complete disaster-recovery deployment is not yet established:** external AWG 3.1 binary provenance, the base vpn-ui service, environment-specific server configuration and a clean installation rehearsal still require verification.
+
+See [Deployment inventory and release gates](deploy/RELEASE_READINESS.md) before installing or upgrading.
 
 Historical one-off migration, repair and legacy cleanup scripts remain available in Git history rather than the active deployment tree.
 
