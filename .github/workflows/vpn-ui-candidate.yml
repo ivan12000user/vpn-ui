@@ -1,0 +1,57 @@
+name: VPN UI candidate checks
+
+on:
+  push:
+    branches:
+      - integration/v080-awg31-tailscale-prep-20261011
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Rust and AWG 3.1 offline tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.98
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+
+      - name: Check Rust formatting
+        run: cargo +1.98.0 fmt --all -- --check
+
+      - name: Check Rust build
+        run: cargo +1.98.0 check --locked
+
+      - name: Run Rust tests
+        run: cargo +1.98.0 test --locked
+
+      - name: Build release executable
+        run: cargo +1.98.0 build --release --locked
+
+      - name: Test isolated AWG 3.1 helpers
+        run: python3 -m unittest discover -s tests -p 'test_awg31_*.py' -v
+
+      - name: Check helper syntax
+        run: |
+          set -eu
+          for script in deploy/libexec/vpn-ui-manage deploy/libexec/vpn-ui-manage-core-v070 deploy/libexec/vpn-ui-awg31-client-config deploy/libexec/vpn-ui-awg31-status; do
+            python3 - "$script" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(), filename=str(path))
+          print("PYTHON OK:", path)
+          PY
+          done
+          for script in deploy/libexec/vpn-ui-awg31-net deploy/bin/vpn-ui-awg31-client-config; do
+            bash -n "$script"
+            echo "SHELL OK: $script"
+          done
