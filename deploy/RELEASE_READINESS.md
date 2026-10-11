@@ -65,7 +65,19 @@ administrators.
   unmodified source with the same compiler and flags. A separate, unprivileged
   GitHub Actions source-build audit is provided. Review bundled dependency
   licensing and binary provenance before any redistribution.
-  **Do not publish the production binary as part of vpn-ui.**
+  **Read-only metadata reported by installed VPS binary (2026-10-12):**
+  `go1.25.12`, `CGO_ENABLED=1`, `GOOS=linux`, `GOARCH=amd64`,
+  `GOAMD64=v1`, module `(devel)`, and no `vcs.revision` /
+  `vcs.modified` / `vcs.time` fields. The existing executable is
+  statically linked and 6,132,984 bytes. The absence of VCS metadata
+  does not establish an upstream commit identity.
+  The official pinned-source Go 1.25.0 builds produced different SHA256
+  values: CGO-enabled `b4d00e7c68d1d6629dd4f369f7181dbb9e75b623e5ff449031fe1d5b27ad5020`
+  (dynamically linked) and CGO-disabled
+  `a6e32f2c8eddb73b5ed9f163e20bf4aa06f1669e87c406c02dc2825d72e75dbe`
+  (statically linked). Different hashes are not proof of modified code,
+  but neither source provenance nor binary equivalence is established.
+  **Do not publish or replace the production binary as part of vpn-ui.**
 - WireGuard and AmneziaWG executables and quick helpers, Linux routing/NAT
   setup, `sudo`, Python 3, shell tools and the relevant userspace/kernel
   capabilities.
