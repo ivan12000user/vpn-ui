@@ -1,0 +1,668 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+WG=/usr/bin/wg
+AWG=/usr/bin/awg
+
+deny()
+{
+    echo "request denied" >&2
+    exit 64
+}
+
+[ "$#" -eq 2 ] || deny
+
+PROVIDER="$1"
+IFACE="$2"
+
+IFS= read -r REQUESTED || deny
+
+[[ "$REQUESTED" =~ ^[A-Za-z0-9+/]{43}=$ ]] || deny
+
+
+wg_client_config()
+{
+    [ "$IFACE" = "wg0" ] || deny
+
+    python3 - "$REQUESTED" <<'PYWG'
+import ipaddress
+import json
+import pathlib
+import subprocess
+import sys
+
+requested = sys.argv[1]
+
+root = pathlib.Path(
+    "/var/lib/vpn-ui/secure/wireguard"
+)
+
+server = json.loads(
+    (root / "server.json").read_text()
+)
+
+client = None
+
+for path in sorted(
+    (root / "clients").glob("*.json")
+):
+    data = json.loads(
+        path.read_text()
+    )
+
+    if data.get("public_key") == requested:
+        client = data
+        break
+
+
+if client is None:
+    raise SystemExit(
+        "client config not found"
+    )
+
+
+# ----------------------------------------------------------
+# Stored client material
+# ----------------------------------------------------------
+
+private_key = str(
+    client.get("private_key") or ""
+).strip()
+
+public_key = str(
+    client.get("public_key") or ""
+).strip()
+
+psk = str(
+    client.get("preshared_key") or ""
+).strip()
+
+
+addresses = [
+    str(x).strip()
+    for x in (
+        client.get("allocated_ips")
+        or []
+    )
+    if str(x).strip()
+]
+
+
+# schema 2 first, schema 1 fallback
+allowed_ips = [
+    str(x).strip()
+    for x in (
+        client.get("client_allowed_ips")
+        or client.get("allowed_ips")
+        or []
+    )
+    if str(x).strip()
+]
+
+
+if not private_key:
+    raise SystemExit(
+        "missing client private key"
+    )
+
+if not public_key:
+    raise SystemExit(
+        "missing client public key"
+    )
+
+if not addresses:
+    raise SystemExit(
+        "missing client address"
+    )
+
+if not allowed_ips:
+    raise SystemExit(
+        "missing client AllowedIPs"
+    )
+
+
+# ----------------------------------------------------------
+# Integrity check
+# ----------------------------------------------------------
+
+check = subprocess.run(
+    ["/usr/bin/wg", "pubkey"],
+    input=private_key + "\n",
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=True,
+)
+
+if check.stdout.strip() != public_key:
+    raise SystemExit(
+        "stored WG keypair mismatch"
+    )
+
+if public_key != requested:
+    raise SystemExit(
+        "requested WG public key mismatch"
+    )
+
+
+# ----------------------------------------------------------
+# Server public key
+# ----------------------------------------------------------
+
+server_public = str(
+    server.get("public_key") or ""
+).strip()
+
+if not server_public:
+    raise SystemExit(
+        "missing server public key"
+    )
+
+
+# ----------------------------------------------------------
+# Endpoint
+# ----------------------------------------------------------
+
+listen_port = str(
+    server.get("listen_port") or ""
+).strip()
+
+
+def endpoint_with_port(host, port):
+    host = str(host or "").strip()
+    port = str(port or "").strip()
+
+    if not host:
+        return ""
+
+    if not port:
+        return host
+
+    if host.startswith("[") and "]:" in host:
+        return host
+
+    try:
+        ip = ipaddress.ip_address(host)
+
+        if ip.version == 6:
+            return f"[{host}]:{port}"
+
+        return f"{host}:{port}"
+
+    except ValueError:
+        pass
+
+    head, sep, tail = host.rpartition(":")
+
+    if sep and head and tail.isdigit():
+        return host
+
+    return f"{host}:{port}"
+
+
+client_endpoint = str(
+    client.get("endpoint") or ""
+).strip()
+
+server_default_endpoint = str(
+    server.get("default_endpoint") or ""
+).strip()
+
+legacy_endpoint_address = str(
+    server.get("endpoint_address") or ""
+).strip()
+
+
+if client_endpoint:
+    endpoint = endpoint_with_port(
+        client_endpoint,
+        listen_port,
+    )
+
+elif server_default_endpoint:
+    endpoint = endpoint_with_port(
+        server_default_endpoint,
+        listen_port,
+    )
+
+else:
+    endpoint = endpoint_with_port(
+        legacy_endpoint_address,
+        listen_port,
+    )
+
+
+# ----------------------------------------------------------
+# DNS
+# ----------------------------------------------------------
+
+client_dns = [
+    str(x).strip()
+    for x in (
+        client.get("dns_servers")
+        or []
+    )
+    if str(x).strip()
+]
+
+if client_dns:
+    dns = client_dns
+
+elif client.get("use_server_dns"):
+    dns = [
+        str(x).strip()
+        for x in (
+            server.get("default_dns_servers")
+            or server.get("dns_servers")
+            or []
+        )
+        if str(x).strip()
+    ]
+
+else:
+    dns = []
+
+
+# ----------------------------------------------------------
+# MTU
+# ----------------------------------------------------------
+
+mtu = str(
+    server.get("default_mtu")
+    or server.get("mtu")
+    or ""
+).strip()
+
+
+# ----------------------------------------------------------
+# Keepalive
+# ----------------------------------------------------------
+
+keepalive = str(
+    client.get("persistent_keepalive")
+    or server.get(
+        "default_persistent_keepalive"
+    )
+    or server.get(
+        "persistent_keepalive"
+    )
+    or ""
+).strip()
+
+
+# ----------------------------------------------------------
+# Render client configuration
+# ----------------------------------------------------------
+
+lines = [
+    "[Interface]",
+    "Address = " + ", ".join(addresses),
+    "PrivateKey = " + private_key,
+]
+
+if dns:
+    lines.append(
+        "DNS = " + ", ".join(dns)
+    )
+
+if mtu:
+    lines.append(
+        "MTU = " + mtu
+    )
+
+
+lines.extend([
+    "",
+    "[Peer]",
+    "PublicKey = " + server_public,
+])
+
+
+if psk:
+    lines.append(
+        "PresharedKey = " + psk
+    )
+
+
+lines.append(
+    "AllowedIPs = "
+    + ", ".join(allowed_ips)
+)
+
+
+if endpoint:
+    lines.append(
+        "Endpoint = " + endpoint
+    )
+
+
+if keepalive:
+    lines.append(
+        "PersistentKeepalive = "
+        + keepalive
+    )
+
+
+print(
+    "\n".join(lines)
+)
+PYWG
+}
+
+
+awg_client_config()
+{
+    [ "$IFACE" = "awg0" ] || deny
+
+    python3 - "$REQUESTED" <<'PYAWG'
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+requested = sys.argv[1]
+
+root = pathlib.Path(
+    "/var/lib/vpn-ui/secure/amneziawg"
+)
+
+server = json.loads(
+    (root / "server.json").read_text()
+)
+
+client = None
+
+for path in sorted(
+    (root / "clients").glob("*.json")
+):
+    data = json.loads(
+        path.read_text()
+    )
+
+    if data.get("public_key") == requested:
+        client = data
+        break
+
+
+if client is None:
+    raise SystemExit(
+        "client config not found"
+    )
+
+
+# ----------------------------------------------------------
+# Client credentials
+# ----------------------------------------------------------
+
+private_key = str(
+    client.get("private_key") or ""
+).strip()
+
+public_key = str(
+    client.get("public_key") or ""
+).strip()
+
+psk = str(
+    client.get("preshared_key") or ""
+).strip()
+
+
+addresses = [
+    str(x).strip()
+    for x in (
+        client.get("allocated_ips")
+        or []
+    )
+    if str(x).strip()
+]
+
+allowed_ips = [
+    str(x).strip()
+    for x in (
+        client.get("client_allowed_ips")
+        or []
+    )
+    if str(x).strip()
+]
+
+
+if not private_key:
+    raise SystemExit(
+        "missing AWG client private key"
+    )
+
+if not public_key:
+    raise SystemExit(
+        "missing AWG client public key"
+    )
+
+if not psk:
+    raise SystemExit(
+        "missing AWG client PSK"
+    )
+
+if not addresses:
+    raise SystemExit(
+        "missing AWG client address"
+    )
+
+if not allowed_ips:
+    raise SystemExit(
+        "missing AWG client AllowedIPs"
+    )
+
+
+# ----------------------------------------------------------
+# Keypair integrity
+# ----------------------------------------------------------
+
+check = subprocess.run(
+    ["/usr/bin/awg", "pubkey"],
+    input=private_key + "\n",
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=True,
+)
+
+derived_public = check.stdout.strip()
+
+if derived_public != public_key:
+    raise SystemExit(
+        "stored AWG keypair mismatch"
+    )
+
+if public_key != requested:
+    raise SystemExit(
+        "requested AWG public key mismatch"
+    )
+
+
+# ----------------------------------------------------------
+# Server identity / endpoint
+# ----------------------------------------------------------
+
+server_public = str(
+    server.get("public_key") or ""
+).strip()
+
+if not server_public:
+    raise SystemExit(
+        "missing AWG server public key"
+    )
+
+
+endpoint = str(
+    client.get("endpoint")
+    or server.get("default_endpoint")
+    or ""
+).strip()
+
+if not endpoint:
+    raise SystemExit(
+        "missing AWG server endpoint"
+    )
+
+
+# ----------------------------------------------------------
+# DNS
+# ----------------------------------------------------------
+
+dns = [
+    str(x).strip()
+    for x in (
+        client.get("dns_servers")
+        or server.get("default_dns_servers")
+        or []
+    )
+    if str(x).strip()
+]
+
+
+# ----------------------------------------------------------
+# Preserve AWG-specific options
+# ----------------------------------------------------------
+
+interface_options = (
+    client.get("interface_options")
+    or {}
+)
+
+peer_options = (
+    client.get("client_peer_options")
+    or {}
+)
+
+
+key_re = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_]*$"
+)
+
+
+def append_options(
+    lines,
+    options,
+    forbidden,
+):
+    if not isinstance(options, dict):
+        raise SystemExit(
+            "invalid AWG options object"
+        )
+
+    for key, values in options.items():
+        key = str(key)
+
+        if key in forbidden:
+            continue
+
+        if not key_re.fullmatch(key):
+            raise SystemExit(
+                f"invalid AWG option name: {key}"
+            )
+
+        if not isinstance(values, list):
+            values = [values]
+
+        for value in values:
+            value = str(value).strip()
+
+            if (
+                "\n" in value
+                or "\r" in value
+            ):
+                raise SystemExit(
+                    "invalid newline in AWG option"
+                )
+
+            if value:
+                lines.append(
+                    f"{key} = {value}"
+                )
+
+
+# ----------------------------------------------------------
+# Render config
+# ----------------------------------------------------------
+
+lines = [
+    "[Interface]",
+    "PrivateKey = " + private_key,
+    "Address = " + ", ".join(addresses),
+]
+
+
+if dns:
+    lines.append(
+        "DNS = " + ", ".join(dns)
+    )
+
+
+append_options(
+    lines,
+    interface_options,
+    {
+        "PrivateKey",
+        "Address",
+        "DNS",
+    },
+)
+
+
+lines.extend([
+    "",
+    "[Peer]",
+    "PublicKey = " + server_public,
+    "PresharedKey = " + psk,
+    "Endpoint = " + endpoint,
+    "AllowedIPs = " + ", ".join(allowed_ips),
+])
+
+
+append_options(
+    lines,
+    peer_options,
+    {
+        "PublicKey",
+        "PresharedKey",
+        "Endpoint",
+        "AllowedIPs",
+        "PersistentKeepalive",
+    },
+)
+
+
+keepalive = str(
+    client.get("persistent_keepalive")
+    or ""
+).strip()
+
+if keepalive:
+    lines.append(
+        "PersistentKeepalive = "
+        + keepalive
+    )
+
+
+print(
+    "\n".join(lines)
+)
+PYAWG
+}
+
+
+case "$PROVIDER|$IFACE" in
+
+    'wg|wg0')
+        wg_client_config
+        ;;
+
+    'awg|awg0')
+        awg_client_config
+        ;;
+
+    *)
+        deny
+        ;;
+esac
