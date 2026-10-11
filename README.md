@@ -1,76 +1,94 @@
 # VPN UI
 
-Unified self-hosted Web UI for WireGuard and AmneziaWG.
+Unified self-hosted Web UI for **WireGuard, AmneziaWG 2.0, AmneziaWG 3.1** and a read-only **Tailscale** overview.
 
-Current application version: **0.7.0**.
+Одна панель для статусов VPN, управления клиентами и настройками интерфейсов.
+
+## Version and release status
+
+- Latest tagged release: **v0.7.0** (Rust / Axum).
+- This integration branch is a **v0.8.0 release candidate**, **not a finished release**.
+- AWG 3.1 and Tailscale are implemented in this source branch, but the standalone deployment bundle is **not yet fully reproducible**. See the draft release PR and the prerequisites below.
+
+## Implemented
+
+- Dashboard with peer inventory, live statuses and online/total counts.
+- WireGuard (`wg0`) and AmneziaWG 2.0 (`awg0`) management.
+- Separate AmneziaWG 3.1 (`awg1`) provider with isolated peer storage, status and client configuration export.
+- Peer creation, editing, enable/disable and deletion with guarded privileged helpers.
+- Client configuration and QR-code export, interface settings, responsive desktop/mobile pages.
+- Read-only Tailscale peer status and overview, refreshed every 15 seconds.
+- Health endpoint and authenticated management interface.
 
 ## Production model
 
-The application runs on the VPN server and is exposed through Nginx. Development machines,
-VPN peers and GitHub are not runtime dependencies.
+The Rust application runs on the VPN server. Development machines, VPN peers, WSL and GitHub are **not runtime dependencies**.
 
-Current internal VPN addressing:
+Example internal VPN addressing for this deployment:
 
-- WireGuard `wg0`: `10.66.66.0/24` — IPv4-only inside the tunnel.
-- AmneziaWG `awg0`: `10.77.77.0/24` — IPv4-only inside the tunnel.
-- Public IPv6 on the VPS is intentionally preserved for the host and HTTPS/Nginx.
-- The former experimental WireGuard ULA `fd66:66:66::/64` is not part of the supported design.
+- WireGuard `wg0`: `10.66.66.0/24` (IPv4-only inside the tunnel).
+- AmneziaWG 2.0 `awg0`: `10.77.77.0/24` (IPv4-only inside the tunnel).
+- AmneziaWG 3.1 `awg1`: `10.88.88.0/24` (UDP 8444, separate userspace engine).
+- Public VPS IPv6 is preserved for the host and Nginx. The old experimental WireGuard ULA `fd66:66:66::/64` is not part of the supported design.
 
-The UI process listens on `127.0.0.1:8090`. Nginx provides the external HTTPS entry point
-and protects the whole UI with HTTP Basic authentication.
+The UI is normally bound to `127.0.0.1:8090` (override with `VPN_UI_LISTEN`). An authenticated Nginx HTTPS frontend is used for external access. Do not expose the privileged admin UI directly to the public internet.
 
-## Management model
+## Architecture
 
-Peer management uses a privileged wrapper plus a versioned management core:
+- Rust 2024 edition, Axum and Tokio.
+- Provider-specific read-only metadata, status collection, and client profile generators.
+- Privileged operations through restricted `sudo` wrappers; inventory and peer files remain on the server.
+- Separate `vpn-ui-awg31.service` invokes the userspace AWG 3.1 engine and network helper; it must not change `wg0` or `awg0`.
+- The Tailscale integration is **read-only**. It does not manage tailnets, membership or exit-node permissions.
 
-- `/usr/local/libexec/vpn-ui-manage` — current wrapper and safe-settings layer.
-- `/usr/local/libexec/vpn-ui-manage-core-v070` — v0.7.0 peer-management core.
-- `/usr/local/bin/vpn-ui-manage-wg` — WireGuard sudo wrapper.
-- `/usr/local/bin/vpn-ui-manage-awg` — AmneziaWG sudo wrapper.
+## Build
 
-Peer create/edit/enable/disable/delete operations use backups, inventory checks and
-`syncconf`; they do not require restarting `wg0` or `awg0`.
+Requirements: Rust 1.98+, Cargo and a Linux target environment.
 
-## Repository layout
+```bash
+cargo fmt --check
+cargo check --locked
+cargo test --locked
+cargo build --release --locked
+```
 
-- `src/` — Rust/Axum application.
-- `deploy/libexec/` — privileged management wrapper and versioned core.
-- `deploy/bin/` — provider-specific command wrappers.
-- `deploy/nginx/` — current Nginx configuration.
-- `deploy/systemd/` — systemd drop-ins required by the UI.
-- `deploy/verify-production.sh` — read-only production consistency audit.
-- `deploy/install-local-ca.sh` — private-CA certificate installation/rotation helper.
+Output: `target/release/vpn-ui`.
 
-Historical one-off deployment, repair, IPv6-cleanup and completed legacy-UI cleanup scripts are intentionally not kept in
-the active deployment tree. They remain available in Git history if an old incident needs to
-be reconstructed.
+For the AWG 3.1 offline Python regression tests, also run the `tests/test_awg31_*.py` tests in a suitable isolated Linux environment.
 
-## Safe production check
+## Deployment components
 
-From the administrative Orange Pi repository checkout:
+- `src/` — Rust web UI and API.
+- `deploy/libexec/` — privileged management core, profile generation and network helpers.
+- `deploy/bin/` — provider-specific commands and wrappers.
+- `deploy/sudoers/` — restricted permissions required by helpers.
+- `deploy/systemd/` — service units and UI drop-ins.
+- `deploy/nginx/` — reverse-proxy configuration.
+- `deploy/verify-production.sh` — read-only consistency audit.
+- `deploy/install-local-ca.sh` — local CA certificate deployment/rotation helper.
+
+The AWG 3.1 engine `amneziawg-go-3.1.20260828` is an **external deployment prerequisite**, not bundled in this repository. Confirm provenance, licensing and its verified checksum before provisioning; do not copy production private keys into source control.
+
+**Release blocker:** the live server also uses a shared WG/AWG 2.0 client-profile generator, two command wrappers and a privileged helper which are not yet packaged in this GitHub branch. Do not treat this checkout as a full disaster-recovery install until these are reviewed and added or replaced by equivalent audited components.
+
+Historical one-off migration, repair and legacy cleanup scripts remain available in Git history rather than the active deployment tree.
+
+## Validation and operations
+
+On a trusted administrative host:
 
 ```bash
 bash deploy/verify-production.sh
 ```
 
-The verifier is read-only. It checks service health, inventory/config/live peer consistency,
-the IPv4-only WireGuard design, public VPS IPv6 preservation, UI health and Nginx.
-It also checks that the retired UI services, listeners, files and `awg-web` account/group are absent.
+This is a read-only production audit. Before any VPS update, also validate service/sudoers prerequisites, Rust and Python tests, profile rendering for all three protocols, Tailscale read-only API, SSH access, backups and a tested rollback. Do not overwrite production configuration or client inventories when installing binaries.
 
+See [AWG31_PARALLEL.md](deploy/AWG31_PARALLEL.md) for AWG 3.1 isolation and rollout considerations.
 
-## Experimental AWG 3.1 (awg1)
+## Security
 
-Branch `feature/awg31-parallel` adds a third independent UI provider:
-AmneziaWG 3.1 `awg1` on `10.88.88.0/24` (UDP 8444).
-It is **not yet installed on production**.
+Never commit private keys, VPN client configurations, secret headers, inventories, passwords, session credentials or real backups. Review scripts manually even after static secret scanning. Protect the UI with authentication, TLS and trusted network access controls.
 
-The existing `wg0` and `awg0` stay unchanged. Peer CRUD, status,
-ping, inventory, client configuration and QR export use separate AWG1
-paths and a userspace `amneziawg-go-3.1.20260828` service.
+## License
 
-**Run offline tests and build before installing this branch.**
-Detailed deployment and rollback plan:
-[AWG31_PARALLEL.md](deploy/AWG31_PARALLEL.md).
-
-When legacy `awg0` is eventually retired, `awg1` can stay named
-`awg1` and be shown as the primary AmneziaWG protocol.
+MIT.
