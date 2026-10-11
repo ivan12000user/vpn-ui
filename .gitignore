@@ -1,3 +1,15 @@
 /target
 __pycache__/
 *.py[cod]
+
+# local secrets / runtime-only material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.htpasswd
+secrets/
+secure/
