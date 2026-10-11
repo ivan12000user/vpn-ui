@@ -27,7 +27,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v3.1.20260828 --single-branch             https://github.com/amnezia-vpn/amneziawg-go.git upstream
+          git clone --depth 1 --branch v3.1.20260828 --single-branch \
+            https://github.com/amnezia-vpn/amneziawg-go.git upstream
           actual="$(git -C upstream rev-parse HEAD)"
           expected="b5928efb6ca19f0153958460c3d141f04abc5c2e"
           echo "Verified source commit: $actual"
@@ -36,7 +37,7 @@ jobs:
           grep -q 'Permission is hereby granted' upstream/LICENSE
           grep -q '^go 1.25.0$' upstream/go.mod
 
-      - name: Build executable without running it
+      - name: Build dynamic and static binaries without running them
         shell: bash
         run: |
           set -euo pipefail
@@ -46,16 +47,21 @@ jobs:
           sha256sum ./amneziawg-go
           go version -m ./amneziawg-go
 
-      - name: Compare output checksum to audited production sample
+          CGO_ENABLED=0 go build -v -o ./amneziawg-go-static .
+          file ./amneziawg-go-static
+          sha256sum ./amneziawg-go-static
+          go version -m ./amneziawg-go-static
+
+      - name: Compare static output to audited production checksum
         shell: bash
         run: |
           set -euo pipefail
           expected=6177066f0e35b1cb44945136d9a10841dd3ce30fdf16009c9a815cd943a982fe
-          actual="$(sha256sum upstream/amneziawg-go | awk '{print $1}')"
+          actual="$(sha256sum upstream/amneziawg-go-static | awk '{print $1}')"
           if [ "$actual" = "$expected" ]; then
-            echo "Build checksum MATCHES the previously audited VPS binary"
+            echo "STATIC BUILD MATCHES previously audited VPS binary checksum"
           else
-            echo "Build checksum differs from VPS binary: this does not prove a different source revision"
-            echo "Compiler versions, flags, build paths and metadata can change hashes"
+            echo "Static build checksum differs from VPS sample."
+            echo "This does not establish a different source revision: compiler or flags may differ."
           fi
-          echo "Unprivileged build only. No production keys, services or tunnels accessed."
+          echo "Unprivileged source builds only. No production keys, VPN devices or tunnel access."
