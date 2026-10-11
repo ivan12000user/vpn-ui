@@ -55,8 +55,17 @@ administrators.
   `/usr/local/libexec/amneziawg-go-3.1.20260828`. An audited installed
   executable previously had SHA256
   `6177066f0e35b1cb44945136d9a10841dd3ce30fdf16009c9a815cd943a982fe`.
-  Its upstream source, reproducible build and redistribution license still
-  require verification. **Do not publish that binary as part of vpn-ui.**
+  **Upstream source now located and pinned:**
+  `https://github.com/amnezia-vpn/amneziawg-go`, tag `v3.1.20260828`,
+  commit `b5928efb6ca19f0153958460c3d141f04abc5c2e` (verified on the
+  upstream GitHub tag ref). Its top-level license is MIT and its `go.mod`
+  requires Go 1.25.0 or newer. The upstream Makefile invokes `go build -v`.
+  This establishes the matching upstream **source version only**: it does **not**
+  prove that the currently installed executable was built from that exact
+  unmodified source with the same compiler and flags. A separate, unprivileged
+  GitHub Actions source-build audit is provided. Review bundled dependency
+  licensing and binary provenance before any redistribution.
+  **Do not publish the production binary as part of vpn-ui.**
 - WireGuard and AmneziaWG executables and quick helpers, Linux routing/NAT
   setup, `sudo`, Python 3, shell tools and the relevant userspace/kernel
   capabilities.
