@@ -1,0 +1,6 @@
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-privileged wg show wg0 dump
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-privileged awg show awg0 dump
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-privileged wg metadata wg0 names
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-privileged awg metadata awg0 names
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-privileged wg settings wg0 show
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-privileged awg settings awg0 show
