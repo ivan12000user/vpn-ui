@@ -12,8 +12,19 @@ permissions:
   contents: read
 
 jobs:
-  validate:
-    name: Rust and AWG 3.1 offline tests
+  formatting:
+    name: Rust formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.98
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+      - name: Check Rust formatting
+        run: cargo +1.98.0 fmt --all -- --check
+
+  compile-and-test:
+    name: Build and offline tests
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -21,10 +32,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust 1.98
-        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt
-
-      - name: Check Rust formatting
-        run: cargo +1.98.0 fmt --all -- --check
+        run: rustup toolchain install 1.98.0 --profile minimal
 
       - name: Check Rust build
         run: cargo +1.98.0 check --locked
