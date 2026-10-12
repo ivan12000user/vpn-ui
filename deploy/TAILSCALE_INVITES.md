@@ -72,3 +72,11 @@ The JSON snapshot includes `invite_checks` and `invite_checks_ok` for device
 queries. An empty invite list is only confirmed when **every device request
 returns a valid list**. HTTP 404, 403 or other errors must be shown as
 *unavailable/incomplete*, not as zero accepted grants or zero invitations.
+
+## External users
+
+The default `GET /tailnet/{tailnet}/users` response returned only a member in
+live validation, while `GET /tailnet/{tailnet}/users?type=shared` returned a
+shared external user. Therefore the backend queries both views, merges by
+case-insensitive login name, and warns if either query fails. Displayed user
+activity is Tailscale control-plane presence, **not** use of a specific exit node.

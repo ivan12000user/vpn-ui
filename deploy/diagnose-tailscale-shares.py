@@ -51,6 +51,17 @@ def fetch(path, token):
         return 0, None, type(error).__name__
 
 
+def invite_summary(data):
+    if isinstance(data, list):
+        return "array", len(data)
+    if isinstance(data, dict):
+        for name in ("deviceInvites", "invites"):
+            if isinstance(data.get(name), list):
+                return name, len(data[name])
+        return "unexpected-object", "unknown"
+    return "unexpected-type", "unknown"
+
+
 def user_summary(data):
     if isinstance(data, dict):
         users = data.get("users")
@@ -121,8 +132,12 @@ def main():
                 print(f"Device {i} identifier {key}: absent")
                 continue
             escaped = urllib.parse.quote(str(device_id), safe="")
-            code, _, kind = fetch(f"device/{escaped}/device-invites", token)
-            print(f"Device {i}, {key}: HTTP={code}, response={kind}")
+            code, data, kind = fetch(f"device/{escaped}/device-invites", token)
+            shape, count = invite_summary(data)
+            print(
+                f"Device {i}, {key}: HTTP={code}, response={kind}, "
+                f"shape={shape}, open-invites={count}"
+            )
     print("===== DONE (NO SECRET VALUES PRINTED) =====")
     return 0
 

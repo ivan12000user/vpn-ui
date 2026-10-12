@@ -95,6 +95,27 @@ fn read_users(doc: &Value) -> Result<Vec<DirectoryUser>, &'static str> {
     Ok(users)
 }
 
+// A default /users response can omit external (shared) users.
+// Request ?type=shared separately; retain each user once by login name.
+fn merge_users(mut primary: Vec<DirectoryUser>, shared: Vec<DirectoryUser>) -> Vec<DirectoryUser> {
+    for user in shared {
+        // Empty login names cannot be reliably correlated, so keep them.
+        if user.login_name.is_empty()
+            || !primary.iter().any(|p| {
+                !p.login_name.is_empty() && p.login_name.eq_ignore_ascii_case(&user.login_name)
+            })
+        {
+            primary.push(user);
+        }
+    }
+    primary.sort_by(|a, b| {
+        a.login_name
+            .to_lowercase()
+            .cmp(&b.login_name.to_lowercase())
+    });
+    primary
+}
+
 fn normalized_time(time: &str) -> String {
     if time.starts_with("0001-01-01") {
         String::new()
@@ -193,19 +214,30 @@ async fn collect(tailnet: &str, token: &str) -> ShareDirectory {
     };
 
     let users_route = format!("tailnet/{tailnet}/users");
+    let shared_route = format!("tailnet/{tailnet}/users?type=shared");
     let devices_route = format!("tailnet/{tailnet}/devices");
-    let (users, devices) = tokio::join!(
+    let (users, shared_users, devices) = tokio::join!(
         get_json(&client, token, &users_route),
+        get_json(&client, token, &shared_route),
         get_json(&client, token, &devices_route),
     );
 
+    let mut directory = Vec::new();
     match users {
         Ok(doc) => match read_users(&doc) {
-            Ok(items) => output.users = items,
+            Ok(items) => directory = items,
             Err(e) => output.warnings.push(format!("Users: {e}")),
         },
         Err(e) => output.warnings.push(format!("Users: {e}")),
     }
+    match shared_users {
+        Ok(doc) => match read_users(&doc) {
+            Ok(items) => directory = merge_users(directory, items),
+            Err(e) => output.warnings.push(format!("Shared users: {e}")),
+        },
+        Err(e) => output.warnings.push(format!("Shared users: {e}")),
+    }
+    output.users = directory;
 
     let mut device_list = match devices {
         Ok(doc) => match read_devices(&doc) {
@@ -402,6 +434,27 @@ mod tests {
         .unwrap();
         assert_eq!(users[0].currently_connected, None);
         assert_eq!(users[1].currently_connected, Some(false));
+    }
+
+    #[test]
+    fn combines_members_with_external_shared_users_without_duplicates() {
+        let members = read_users(&json!({"users":[
+            {"loginName":"owner@example.test","type":"member","currentlyConnected":true},
+            {"loginName":"duplicate@example.test","type":"member"}
+        ]}))
+        .unwrap();
+        let shared = read_users(&json!({"users":[
+            {"loginName":"guest@example.test","type":"shared","currentlyConnected":false},
+            {"loginName":"DUPLICATE@example.test","type":"member"}
+        ]}))
+        .unwrap();
+        let result = merge_users(members, shared);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.iter().filter(|u| u.kind == "shared").count(), 1);
+        assert_eq!(
+            result.iter().find(|u| u.login_name == "guest@example.test").unwrap().currently_connected,
+            Some(false)
+        );
     }
 
     #[test]
