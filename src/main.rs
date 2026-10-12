@@ -4,6 +4,7 @@ mod html_polish;
 mod icon;
 mod settings_manage;
 mod tailscale;
+mod tailscale_admin;
 mod vpn;
 mod web;
 

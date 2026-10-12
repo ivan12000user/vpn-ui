@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - master
+      - integration/v080-awg31-tailscale-prep-20261011
 
 permissions:
   contents: read
