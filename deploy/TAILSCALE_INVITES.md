@@ -65,3 +65,10 @@ be modified as part of credential provisioning.
   listener should stay bound to `127.0.0.1`.
 - This directory is not a live traffic analyzer, permission evaluator,
   or replacement for Tailscale Admin Console.
+
+## Invite request completeness
+
+The JSON snapshot includes `invite_checks` and `invite_checks_ok` for device
+queries. An empty invite list is only confirmed when **every device request
+returns a valid list**. HTTP 404, 403 or other errors must be shown as
+*unavailable/incomplete*, not as zero accepted grants or zero invitations.

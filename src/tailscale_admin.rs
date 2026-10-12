@@ -19,6 +19,8 @@ pub struct ShareDirectory {
     pub configured: bool,
     pub users: Vec<DirectoryUser>,
     pub invites: Vec<DeviceInvite>,
+    pub invite_checks: usize,
+    pub invite_checks_ok: usize,
     pub warnings: Vec<String>,
 }
 
@@ -238,9 +240,13 @@ async fn collect(tailnet: &str, token: &str) -> ShareDirectory {
 
     tokio::pin!(tasks);
     while let Some((name, result)) = tasks.next().await {
+        output.invite_checks += 1;
         match result {
             Ok(doc) => match read_invites(&doc, &name) {
-                Ok(invites) => output.invites.extend(invites),
+                Ok(invites) => {
+                    output.invite_checks_ok += 1;
+                    output.invites.extend(invites);
+                }
                 Err(e) => output.warnings.push(format!("Invites for {name}: {e}")),
             },
             Err(e) => output.warnings.push(format!("Invites for {name}: {e}")),
@@ -399,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn supports_empty_and_wrapped_invites() {
+    fn empty_response_is_only_success_when_parsed() {
         assert_eq!(read_invites(&Value::Null, "VPS").unwrap().len(), 0);
         assert_eq!(
             read_invites(&json!({"deviceInvites":[]}), "VPS")
@@ -477,6 +483,9 @@ pub const PANEL: &str = r#"
     const users = Array.isArray(data.users) ? data.users : [];
     const invites = Array.isArray(data.invites) ? data.invites : [];
     const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    const inviteChecks = Number(data.invite_checks || 0);
+    const inviteChecksOk = Number(data.invite_checks_ok || 0);
+    const inviteDataComplete = inviteChecks > 0 && inviteChecksOk === inviteChecks && !warnings.length;
     for (const user of users) {
       const row = document.createElement('tr');
       cell(row, user.display_name && user.login_name ? user.display_name + ' (' + user.login_name + ')' : user.login_name || user.display_name);
@@ -497,9 +506,18 @@ pub const PANEL: &str = r#"
       cell(row, when(invite.created));
       invitesBody.appendChild(row);
     }
-    if (!invites.length) empty(invitesBody, 5, 'Открытых приглашений нет или они недоступны; принятые доступы тут не отображаются');
-    status.textContent = users.length + ' пользователей · ' + invites.length + ' открытых приглашений'
-      + (warnings.length ? ' · Неполные данные: ' + warnings.slice(0, 3).join('; ') : '')
+    if (!invites.length) {
+      empty(invitesBody, 5, inviteDataComplete
+        ? 'Открытых приглашений не обнаружено (проверено ' + inviteChecks + ' устройств); принятые доступы здесь не показываются'
+        : 'Сведения о приглашениях недоступны или неполны; ноль приглашений не подтверждён');
+    }
+    const invitesText = inviteDataComplete
+      ? invites.length + ' открытых приглашений'
+      : 'открытые приглашения: неизвестно (получено ' + invites.length + ')';
+    status.textContent = users.length + ' пользователей · ' + invitesText
+      + ' · проверено узлов: ' + inviteChecksOk + '/' + inviteChecks
+      + (warnings.length ? ' · Ошибки API: ' + warnings.length
+          + (warnings.some(w => w.includes('HTTP 404')) ? ' (есть HTTP 404)' : '') : '')
       + ' · серверный кеш до 3 минут';
   }
   async function refresh() {
