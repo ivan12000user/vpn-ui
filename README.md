@@ -4,6 +4,17 @@ Unified self-hosted Web UI for **WireGuard, AmneziaWG 2.0, AmneziaWG 3.1** and a
 
 Одна панель для статусов VPN, управления клиентами и настройками интерфейсов.
 
+## Start here
+
+- [Repository map and branch policy](docs/REPOSITORY.md): which source to use, what is packaged, and what remains external.
+- [Build and verify on Z270 WSL](docs/BUILD_Z270.md): one checkout, pinned toolchain, offline checks and build identity.
+- [Deployment release gates](deploy/RELEASE_READINESS.md): prerequisites for a clean server and production changes.
+
+The running UI's `0.7.0` label does not identify its Git commit or feature set.
+AWG 3.1 and Tailscale have also been observed in a deployed build reporting
+`0.7.0`. Compare source revisions and artifact checksums rather than version
+labels alone.
+
 ## Version and release status
 
 - Latest tagged release: **v0.7.0** (Rust / Axum).
