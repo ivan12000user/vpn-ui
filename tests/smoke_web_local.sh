@@ -76,4 +76,20 @@ for item in 'wireguard:WireGuard' 'amneziawg:AmneziaWG' \
   echo "READ-ONLY PAGE PASS: /$route"
 done
 
+# Without administrator credentials the invited-users API must remain disabled
+# and must not attempt external Tailscale API requests.
+curl --silent --show-error --fail --max-time 5 \
+  "$base/api/tailscale/shares" -o "$tmp/ts-shares.json"
+python3 - "$tmp/ts-shares.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+data = json.loads(Path(sys.argv[1]).read_text())
+assert data["configured"] is False, data
+assert data["users"] == [], data
+assert data["invites"] == [], data
+print("TAILSCALE INVITES DISABLED-BY-DEFAULT PASS")
+PY
+
 echo 'LOCALHOST SMOKE PASS (no root, no VPN tunnels, no external access)'
