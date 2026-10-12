@@ -51,12 +51,15 @@ def fetch(path, token):
         return 0, None, type(error).__name__
 
 
-def count_users(data):
-    if isinstance(data, dict) and isinstance(data.get("users"), list):
-        return len(data["users"])
-    if isinstance(data, list):
-        return len(data)
-    return "unknown"
+def user_summary(data):
+    if isinstance(data, dict):
+        users = data.get("users")
+    else:
+        users = data
+    if not isinstance(users, list):
+        return "unknown", "unknown", "unknown"
+    kinds = [u.get("type") if isinstance(u, dict) else None for u in users]
+    return len(users), kinds.count("member"), kinds.count("shared")
 
 
 def main():
@@ -93,7 +96,11 @@ def main():
         ("shared", "tailnet/-/users?type=shared"),
     ):
         code, data, kind = fetch(path, token)
-        print(f"Users {name}: HTTP={code}, count={count_users(data)}, response={kind}")
+        total, members, shared = user_summary(data)
+        print(
+            f"Users {name}: HTTP={code}, count={total}, "
+            f"member={members}, shared={shared}, response={kind}"
+        )
 
     code, devices_doc, kind = fetch("tailnet/-/devices", token)
     print("===== DEVICE INVENTORY =====")
