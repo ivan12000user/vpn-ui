@@ -452,7 +452,11 @@ mod tests {
         assert_eq!(result.len(), 3);
         assert_eq!(result.iter().filter(|u| u.kind == "shared").count(), 1);
         assert_eq!(
-            result.iter().find(|u| u.login_name == "guest@example.test").unwrap().currently_connected,
+            result
+                .iter()
+                .find(|u| u.login_name == "guest@example.test")
+                .unwrap()
+                .currently_connected,
             Some(false)
         );
     }
