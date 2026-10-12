@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/amneziawg31", get(amneziawg31_page))
         .route("/tailscale", get(tailscale_page))
         .route("/api/tailscale/status", get(tailscale_api))
+        .route("/api/tailscale/shares", get(tailscale_shares_api))
         .route("/settings", get(settings_page))
         .route("/api/admin/auth", get(admin_auth))
         .route("/admin/client", get(crate::admin::client_page))
@@ -419,6 +420,13 @@ async fn tailscale_api() -> Json<tailscale::TailStatus> {
     Json(tailscale::status().await)
 }
 
+async fn tailscale_shares_api() -> impl IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(crate::tailscale_admin::status().await),
+    )
+}
+
 async fn tailscale_page() -> impl IntoResponse {
     let status = tailscale::status().await;
     Html(layout("Tailscale", &tailscale_page_body(&status)))
@@ -543,7 +551,7 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
         exit = exit,
         backend = escape_html(status_name),
         rows = tailscale_rows(status),
-    )
+    ) + crate::tailscale_admin::PANEL
 }
 
 fn dashboard_card(path: &str, status: &InterfaceStatus) -> String {
