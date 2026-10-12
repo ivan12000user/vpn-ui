@@ -196,9 +196,11 @@ async fn collect(tailnet: &str, token: &str) -> ShareDirectory {
         }
     };
 
+    let users_route = format!("tailnet/{tailnet}/users");
+    let devices_route = format!("tailnet/{tailnet}/devices");
     let (users, devices) = tokio::join!(
-        get_json(&client, token, &format!("tailnet/{tailnet}/users")),
-        get_json(&client, token, &format!("tailnet/{tailnet}/devices")),
+        get_json(&client, token, &users_route),
+        get_json(&client, token, &devices_route),
     );
 
     match users {
