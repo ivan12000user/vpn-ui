@@ -1,4 +1,4 @@
-//! Read-only Tailscale admin API snapshot for accepted/pending device share invites.
+//! Read-only Tailscale admin API snapshot for users and *open* device invites.
 //! Never return inviteUrl (bearer credential) or Tailscale API tokens to the browser.
 use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
@@ -37,14 +37,13 @@ pub struct DirectoryUser {
 pub struct DeviceInvite {
     pub device: String,
     pub email: String,
-    pub accepted_by: String,
-    pub accepted: Option<bool>,
     pub allow_exit_node: Option<bool>,
     pub created: String,
     pub multi_use: bool,
 }
 
 static CACHE: OnceLock<Mutex<Option<(Instant, ShareDirectory)>>> = OnceLock::new();
+static OAUTH_CACHE: OnceLock<Mutex<Option<(Instant, String)>>> = OnceLock::new();
 
 fn safe_id(s: &str) -> bool {
     !s.is_empty()
@@ -144,11 +143,6 @@ fn read_invites(doc: &Value, device: &str) -> Result<Vec<DeviceInvite>, &'static
         .map(|invite| DeviceInvite {
             device: device.to_owned(),
             email: field(invite, "email"),
-            accepted_by: invite
-                .get("acceptedBy")
-                .map(|v| field(v, "loginName"))
-                .unwrap_or_default(),
-            accepted: invite.get("accepted").and_then(Value::as_bool),
             allow_exit_node: invite.get("allowExitNode").and_then(Value::as_bool),
             created: field(invite, "created"),
             multi_use: invite
@@ -261,6 +255,77 @@ async fn collect(tailnet: &str, token: &str) -> ShareDirectory {
     output
 }
 
+
+// OAuth tokens expire in one hour. Cache for 45 minutes and request a fresh
+// token as needed. Credentials never enter environment variables or logs.
+async fn oauth_bearer(client_id: &str, secret_file: &str) -> Result<String, String> {
+    let mutex = OAUTH_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().await;
+    if let Some((when, value)) = guard.as_ref() {
+        if when.elapsed() < Duration::from_secs(45 * 60) {
+            return Ok(value.clone());
+        }
+    }
+
+    let secret = fs::read_to_string(secret_file)
+        .map_err(|_| "OAuth credential cannot be read".to_owned())?;
+    let secret = secret.trim();
+    if secret.is_empty() || secret.len() > 2048 {
+        return Err("OAuth credential invalid".to_owned());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|_| "OAuth client initialization failed".to_owned())?;
+    let response = client
+        .post(format!("{API_BASE}/oauth/token"))
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id),
+            ("client_secret", secret),
+        ])
+        .send()
+        .await
+        .map_err(|_| "OAuth token connection failed".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!("OAuth token HTTP {}", response.status().as_u16()));
+    }
+    let doc = response
+        .json::<Value>()
+        .await
+        .map_err(|_| "OAuth token JSON invalid".to_owned())?;
+    let access_token = field(&doc, "access_token");
+    if access_token.is_empty() {
+        return Err("OAuth token missing".to_owned());
+    }
+    *guard = Some((Instant::now(), access_token.clone()));
+    Ok(access_token)
+}
+
+async fn load_bearer() -> Result<Option<String>, String> {
+    if let (Ok(id), Ok(path)) = (
+        env::var("VPN_UI_TS_OAUTH_CLIENT_ID"),
+        env::var("VPN_UI_TS_OAUTH_SECRET_FILE"),
+    ) {
+        if id.trim().is_empty() || path.trim().is_empty() {
+            return Ok(None);
+        }
+        return oauth_bearer(&id, &path).await.map(Some);
+    }
+    let Ok(path) = env::var("VPN_UI_TS_API_TOKEN_FILE") else {
+        return Ok(None);
+    };
+    if path.trim().is_empty() {
+        return Ok(None);
+    }
+    match fs::read_to_string(path) {
+        Ok(key) if !key.trim().is_empty() && key.trim().len() <= 2048 => {
+            Ok(Some(key.trim().to_owned()))
+        }
+        _ => Err("API credential missing or unreadable".to_owned()),
+    }
+}
+
 pub async fn status() -> ShareDirectory {
     let Ok(tailnet) = env::var("VPN_UI_TS_TAILNET") else {
         return ShareDirectory::default();
@@ -271,10 +336,10 @@ pub async fn status() -> ShareDirectory {
             ..Default::default()
         };
     }
-    let Ok(file) = env::var("VPN_UI_TS_API_TOKEN_FILE") else {
-        return ShareDirectory::default();
-    };
-    if file.trim().is_empty() {
+    let is_oauth_configured = env::var("VPN_UI_TS_OAUTH_CLIENT_ID").is_ok()
+        && env::var("VPN_UI_TS_OAUTH_SECRET_FILE").is_ok();
+    let is_api_token_configured = env::var("VPN_UI_TS_API_TOKEN_FILE").is_ok();
+    if !is_oauth_configured && !is_api_token_configured {
         return ShareDirectory::default();
     }
 
@@ -286,13 +351,16 @@ pub async fn status() -> ShareDirectory {
         }
     }
 
-    let result = match fs::read_to_string(&file) {
-        Ok(value) if !value.trim().is_empty() && value.trim().len() <= 1024 => {
-            collect(&tailnet, value.trim()).await
-        }
-        _ => ShareDirectory {
+    let result = match load_bearer().await {
+        Ok(Some(token)) => collect(&tailnet, &token).await,
+        Ok(None) => ShareDirectory {
             configured: true,
-            warnings: vec!["API credential missing or unreadable".into()],
+            warnings: vec!["API credential not configured".into()],
+            ..Default::default()
+        },
+        Err(message) => ShareDirectory {
+            configured: true,
+            warnings: vec![message],
             ..Default::default()
         },
     };
@@ -306,17 +374,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn captures_share_recipient_and_exit_permission_without_invite_link() {
+    fn captures_open_invite_without_bearer_link() {
         let doc = json!([{
             "email": "first@example.test",
-            "accepted": true,
-            "acceptedBy": {"loginName": "actual@example.test"},
             "allowExitNode": true,
             "multiUse": false,
             "inviteUrl": "https://login.tailscale.com/admin/invite/SECRET"
         }]);
         let invites = read_invites(&doc, "VPS").unwrap();
-        assert_eq!(invites[0].accepted_by, "actual@example.test");
         assert!(invites[0].allow_exit_node.unwrap());
         let serialized = serde_json::to_string(&invites).unwrap();
         assert!(!serialized.contains("SECRET"));
@@ -357,19 +422,20 @@ mod tests {
 
 pub const PANEL: &str = r#"
 <section class="panel" id="ts-directory">
-  <h2>Приглашённые пользователи и доступы к узлам</h2>
+  <h2>Пользователи и приглашения Tailscale</h2>
   <p class="muted">Данные административного API Tailscale, только просмотр. Онлайн ≠ использование Exit Node.
-  Принятое приглашение само по себе не доказывает, что доступ действует сейчас.
+  API приглашений содержит только открытые приглашения; принятые доступы проверяются отдельно в админ-панели Tailscale.
   Доступ участников tailnet определяется ACL/grants и не выводится из списка приглашений.</p>
   <div class="toolbar"><button type="button" class="button" id="ts-directory-refresh">↻ Проверить данные</button>
   <span class="muted" id="ts-directory-status">Загрузка…</span></div>
   <h3>Пользователи tailnet и внешние пользователи</h3>
-  <div class="table-wrap"><table><thead><tr><th>Аккаунт</th><th>Тип</th><th>Статус Tailscale</th><th>Последняя активность</th><th>Устройства</th><th>Принятые приглашения к узлам</th></tr></thead>
+  <div class="table-wrap"><table><thead><tr><th>Аккаунт</th><th>Тип</th><th>Статус Tailscale</th><th>Последняя активность</th><th>Устройства</th><th>Доступ к конкретным узлам</th></tr></thead>
   <tbody id="ts-directory-users"><tr><td colspan="6">Загрузка…</td></tr></tbody></table></div>
-  <h3>Приглашения к отдельным узлам</h3>
-  <div class="table-wrap"><table><thead><tr><th>Узел</th><th>Кому направлено</th><th>Кто принял</th><th>Состояние приглашения</th><th>Exit Node разрешён</th><th>Создано</th></tr></thead>
-  <tbody id="ts-directory-invites"><tr><td colspan="6">Загрузка…</td></tr></tbody></table></div>
-  <p class="muted">Показаны только приглашения, которые вернул API. Ссылки приглашений скрыты. Если API вернул неполные сведения, появится предупреждение; отсутствие строки не означает отсутствие доступа.</p>
+  <h3>Открытые приглашения к отдельным узлам</h3>
+  <div class="table-wrap"><table><thead><tr><th>Узел</th><th>Кому направлено</th><th>Статус</th><th>Exit Node разрешён</th><th>Создано</th></tr></thead>
+  <tbody id="ts-directory-invites"><tr><td colspan="5">Загрузка…</td></tr></tbody></table></div>
+  <p class="muted">Показаны только открытые приглашения. Уже принятые разрешения тут не перечисляются. Ссылки приглашений скрыты. Если API вернул неполные сведения, появится предупреждение; отсутствие строки не означает отсутствие доступа.</p>
+  <p class="muted">API не предоставляет здесь точную связь «внешний пользователь → все уже расшаренные ему узлы». Для такой матрицы потребуется дополнительная проверка источника.</p>
 </section>
 <script>
 (() => {
@@ -405,22 +471,13 @@ pub const PANEL: &str = r#"
     clear(invitesBody);
     if (!data.configured) {
       status.textContent = 'Административный API ещё не настроен на сервере';
-      empty(usersBody, 6, 'Нужны VPN_UI_TS_TAILNET и файл API-токена');
-      empty(invitesBody, 6, 'Нет данных');
+      empty(usersBody, 6, 'Нужны настройки OAuth или файла API-токена');
+      empty(invitesBody, 5, 'Нет данных');
       return;
     }
     const users = Array.isArray(data.users) ? data.users : [];
     const invites = Array.isArray(data.invites) ? data.invites : [];
     const warnings = Array.isArray(data.warnings) ? data.warnings : [];
-    const acceptedBy = new Map();
-    for (const invite of invites) {
-      if (invite.accepted === true && invite.accepted_by) {
-        const key = invite.accepted_by.toLowerCase();
-        const set = acceptedBy.get(key) || new Set();
-        set.add(invite.device);
-        acceptedBy.set(key, set);
-      }
-    }
     for (const user of users) {
       const row = document.createElement('tr');
       cell(row, user.display_name && user.login_name ? user.display_name + ' (' + user.login_name + ')' : user.login_name || user.display_name);
@@ -428,8 +485,7 @@ pub const PANEL: &str = r#"
       cell(row, connection(user.currently_connected) + (user.status ? ' · ' + user.status : ''));
       cell(row, when(user.last_seen));
       cell(row, user.device_count);
-      const nodes = acceptedBy.get((user.login_name || '').toLowerCase());
-      cell(row, nodes && nodes.size ? [...nodes].join(', ') : 'Не подтверждены по API приглашений');
+      cell(row, user.kind === 'shared' ? 'Требует проверки по устройствам в Admin Console' : 'Определяется ACL/grants');
       usersBody.appendChild(row);
     }
     if (!users.length) empty(usersBody, 6, 'Пользователи не получены');
@@ -437,14 +493,13 @@ pub const PANEL: &str = r#"
       const row = document.createElement('tr');
       cell(row, invite.device);
       cell(row, invite.email || 'Ссылка без адресата');
-      cell(row, invite.accepted_by);
-      cell(row, invite.accepted === true ? 'Принято' : invite.accepted === false ? 'Ожидает' : 'Неизвестно');
+      cell(row, 'Ожидает');
       cell(row, invite.allow_exit_node === true ? 'Да' : invite.allow_exit_node === false ? 'Нет' : 'Неизвестно');
       cell(row, when(invite.created));
       invitesBody.appendChild(row);
     }
-    if (!invites.length) empty(invitesBody, 6, 'API не вернул приглашений; это не проверка текущих разрешений');
-    status.textContent = users.length + ' пользователей · ' + invites.length + ' приглашений'
+    if (!invites.length) empty(invitesBody, 5, 'Открытых приглашений нет или они недоступны; принятые доступы тут не отображаются');
+    status.textContent = users.length + ' пользователей · ' + invites.length + ' открытых приглашений'
       + (warnings.length ? ' · Неполные данные: ' + warnings.slice(0, 3).join('; ') : '')
       + ' · серверный кеш до 3 минут';
   }

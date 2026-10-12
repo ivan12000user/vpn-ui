@@ -1,66 +1,67 @@
-# Tailscale users and device-share invites — read-only preview
+# Tailscale user activity and open device-share invites — read-only preview
 
-This feature is developed on `feature/ts-shared-users-activity` and must **not** be
-installed over production v0.8.0 until CI, manual verification, and rollback checks.
+This feature is developed on `feature/ts-shared-users-activity`. Do not
+install it over production v0.8.0 without isolated testing and rollback.
 
-## Sources and semantics
+## Data semantics
 
-* `GET /api/v2/tailnet/{tailnet}/users`: user type (member/shared),
-  `currentlyConnected` and `lastSeen`. This is *not* exit-node traffic.
-* `GET /api/v2/tailnet/{tailnet}/devices`: owned device inventory.
-* `GET /api/v2/device/{id}/device-invites`: per-device share invites.
-  `acceptedBy.loginName` and `allowExitNode` are extracted when available.
-  **Never return or log `inviteUrl`**, a bearer capability.
-* One recipient may have accepted several device shares. The UI groups
-  those *accepted invite records* by login name, without claiming that the
-  current ACL/grants or share still allow access. Member access depends
-  on policy, not on invite rows.
-* An absent invite row is NOT proof of no access. The backend reports
-  partial errors (including permissions issues) instead of silently reporting
-  a complete empty list.
+- `GET /api/v2/tailnet/{tailnet}/users` supplies user types (including
+  `shared`), `currentlyConnected`, and `lastSeen` when available.
+  This is not proof of exit-node traffic.
+- `GET /api/v2/tailnet/{tailnet}/devices` lists tailnet devices.
+- `GET /api/v2/device/{id}/device-invites` lists *open* (not yet accepted)
+  device invitations. The API does **not** provide a complete record of
+  accepted grants; an absent row does not mean no current access.
+- Each external user can receive access to multiple devices. This endpoint
+  does not establish the full mapping of already accepted shares. Do not
+  invent those mappings in the UI.
+- Access for tailnet members depends on grants/ACL policy, not invitations.
 
-## Configuration, no secrets in systemd Environment=
+## Least-privileged authentication (preferred: OAuth client)
 
-The integration is disabled unless **both** values are present:
+Create a Tailscale OAuth client under the tailnet's Trust credentials
+with **exact** read-only scopes:
 
-* `VPN_UI_TS_TAILNET`: your tailnet identifier/domain.
-* `VPN_UI_TS_API_TOKEN_FILE`: readable *file path*, never the token value.
+- `users:read`
+- `devices:core:read`
+- `devices_invites:read`
 
-Example **for later, after tests**, using a systemd credential:
+OAuth access tokens expire after 1 hour; the Rust app obtains a fresh token
+and caches it for up to 45 minutes. The secret stays in a credential file.
 
-1. Obtain a Tailscale API token from the admin console.
-   API tokens expire; configure key rotation. Prefer a scoped OAuth design
-   for a future unattended long-term production integration.
-2. Put the token in a root-owned `0600` file under `/etc/vpn-ui/`.
-   Do not paste it into chats, GitHub, process command lines, environment
-   values or curl diagnostics.
-3. Add a dedicated drop-in to `vpn-ui.service`:
+Configuration for a **future isolated validation service**:
 
-   ```ini
-   [Service]
-   LoadCredential=ts_admin_api_token:/etc/vpn-ui/ts_admin_api_token
-   Environment=VPN_UI_TS_TAILNET=example.ts.net
-   Environment=VPN_UI_TS_API_TOKEN_FILE=/run/credentials/vpn-ui.service/ts_admin_api_token
-   ```
+```ini
+[Service]
+LoadCredential=ts_oauth_secret:/etc/vpn-ui/ts_oauth_secret
+Environment=VPN_UI_TS_TAILNET=-
+Environment=VPN_UI_TS_OAUTH_CLIENT_ID=your-client-id
+Environment=VPN_UI_TS_OAUTH_SECRET_FILE=/run/credentials/YOUR-TEST-SERVICE.service/ts_oauth_secret
+```
 
-4. Only after a separate production-change review, reload systemd and
-   restart the UI, *not* any VPN tunnel.
+Use tailnet `-` to refer to the tailnet owning the token; this avoids
+confusing display name and legacy ID with the current Tailnet ID. Never
+write a credential to a Git repository, debug log, shell history, argv,
+or a plain environment variable.
 
-A credential restricted to GET endpoints is not generally enforced with a
-normal personal API token; this implementation only sends GET requests.
-For future scoped OAuth credentials, required endpoint scopes are
-`users:read`, `devices:core:read`, `devices_invites:read`.
+For one-off testing, `VPN_UI_TS_API_TOKEN_FILE` may point to a
+credential file, but personal API tokens have broader permission and
+expire after 1–90 days. Do not make one for long-term unattended use.
+OAuth settings take priority over the API-token fallback.
 
-## Safety
+The current production `vpn-ui.service` and its VPN interfaces must not
+be modified as part of credential provisioning.
 
-* Backend HTTPS host fixed to `api.tailscale.com`; no user-provided URL.
-* Results are cached for 180 seconds; requests for device invites run at
-  concurrency 4, with a 64-device inventory cap and explicit warning.
-* Request timeout is 8 seconds. Only supported fields are copied to API
-  JSON; the raw upstream response is never returned.
-* HTML uses DOM textContent, not untrusted innerHTML.
-* New JSON endpoint `/api/tailscale/shares` uses no-store, but still
-  requires the **existing authenticated Nginx perimeter** to avoid exposing
-  account email addresses. Do not expose port 8090 publicly.
-* Statuses: `currentlyConnected` is not equivalent to traffic through an
-  exit node. Invite acceptance is not proof of ongoing access.
+## Security
+
+- No privileged Tailscale mutations are performed; only GET to data APIs,
+  and POST to the fixed HTTPS OAuth token exchange endpoint.
+- Rust copies a small set of fields to JSON. Secret invite URLs, raw
+  upstream responses, OAuth secrets and access tokens never go to clients.
+- Cache 180 seconds; at most four simultaneous device queries and 64
+  devices per snapshot. Incomplete responses are marked.
+- New endpoint `/api/tailscale/shares` carries personal identifiers.
+  It must be protected by existing nginx authentication; the Rust
+  listener should stay bound to `127.0.0.1`.
+- This directory is not a live traffic analyzer, permission evaluator,
+  or replacement for Tailscale Admin Console.
