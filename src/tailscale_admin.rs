@@ -255,7 +255,6 @@ async fn collect(tailnet: &str, token: &str) -> ShareDirectory {
     output
 }
 
-
 // OAuth tokens expire in one hour. Cache for 45 minutes and request a fresh
 // token as needed. Credentials never enter environment variables or logs.
 async fn oauth_bearer(client_id: &str, secret_file: &str) -> Result<String, String> {
