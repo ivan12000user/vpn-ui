@@ -1,0 +1,164 @@
+name: VPN UI candidate checks
+
+on:
+  push:
+    branches:
+      - integration/v080-awg31-tailscale-prep-20261011
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  formatting:
+    name: Rust formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.98
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+      - name: Check Rust formatting
+        run: cargo +1.98.0 fmt --all -- --check
+
+  compile-and-test:
+    name: Build and offline tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.98
+        run: rustup toolchain install 1.98.0 --profile minimal
+
+      - name: Check Rust build
+        run: cargo +1.98.0 check --locked
+
+      - name: Run Rust tests
+        run: cargo +1.98.0 test --locked
+
+      - name: Build release executable
+        run: cargo +1.98.0 build --release --locked
+
+      - name: Stage installation safely in disposable filesystem
+        run: python3 tests/stage_deployment.py
+
+      - name: Smoke-test VPN UI over isolated localhost
+        run: bash tests/smoke_web_local.sh
+
+      - name: Test isolated AWG 3.1 helpers
+        run: python3 -m unittest discover -s tests -p 'test_awg31_*.py' -v
+
+      - name: Test WG/AWG 2.0 profile generators and privilege boundaries
+        run: python3 -m unittest discover -s tests -p 'test_client_config_helpers.py' -v
+
+      - name: Validate read-only wrappers and sudoers
+        run: python3 -m unittest discover -s tests -p 'test_readonly_deployment.py' -v
+
+      - name: Check helper syntax
+        run: |
+          set -eu
+          for script in deploy/libexec/vpn-ui-manage deploy/libexec/vpn-ui-manage-core-v070 deploy/libexec/vpn-ui-awg31-client-config deploy/libexec/vpn-ui-awg31-status; do
+            python3 - "$script" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(), filename=str(path))
+          print("PYTHON OK:", path)
+          PY
+          done
+          for script in deploy/libexec/vpn-ui-awg31-net deploy/bin/vpn-ui-awg31-client-config; do
+            bash -n "$script"
+            echo "SHELL OK: $script"
+          done
+
+      - name: Package verified Linux x86-64 binary for offline WSL lab
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          install -d -m 0755 release-artifact
+          install -m 0755 target/release/vpn-ui release-artifact/vpn-ui
+          (cd release-artifact && sha256sum vpn-ui > SHA256SUMS)
+          printf '%s\n' "$GITHUB_SHA" > release-artifact/SOURCE_COMMIT
+
+      - name: Upload isolated WSL lab binary
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpn-ui-v080-wsl-lab-linux-amd64
+          path: release-artifact/
+          if-no-files-found: error
+          retention-days: 7
+
+  wsl-jammy-build:
+    name: Ubuntu 22.04 WSL compatibility
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout pinned candidate
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.98 for Ubuntu 22.04
+        run: rustup toolchain install 1.98.0 --profile minimal
+
+      - name: Build Jammy-compatible release binary
+        run: cargo +1.98.0 build --release --locked
+
+      - name: Verify glibc compatibility with Z270 Ubuntu 22.04
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd --version | head -1
+          python3 - <<'PY'
+          import re
+          import subprocess
+
+          binary = "target/release/vpn-ui"
+          output = subprocess.check_output(
+              ["readelf", "--version-info", binary], text=True
+          )
+          needed = sorted({
+              tuple(map(int, match))
+              for match in re.findall(r"GLIBC_(\d+)\.(\d+)", output)
+          })
+          print("GLIBC requirements:", ", ".join(
+              f"{major}.{minor}" for major, minor in needed
+          ))
+          if needed and max(needed) > (2, 35):
+              raise SystemExit(
+                  f"FAIL: binary needs GLIBC_{max(needed)[0]}.{max(needed)[1]}, "
+                  "Z270 Ubuntu 22.04 provides GLIBC_2.35"
+              )
+          print("GLIBC 2.35 COMPATIBILITY PASS")
+          PY
+
+      - name: Test executable on real Ubuntu 22.04 localhost
+        run: bash tests/smoke_web_local.sh
+
+      - name: Verify disposable install file layout
+        run: python3 tests/stage_deployment.py
+
+      - name: Package verified Ubuntu 22.04 binary
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0755 release-jammy
+          install -m 0755 target/release/vpn-ui release-jammy/vpn-ui
+          (cd release-jammy && sha256sum vpn-ui > SHA256SUMS)
+          printf '%s\n' "$GITHUB_SHA" > release-jammy/SOURCE_COMMIT
+          printf '%s\n' "ubuntu-22.04 glibc-2.35 amd64" > release-jammy/BUILD_PLATFORM
+          cat release-jammy/SHA256SUMS
+
+      - name: Upload Z270 WSL Jammy compatibility artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpn-ui-v080-ubuntu2204-z270-amd64
+          path: release-jammy/
+          if-no-files-found: error
+          retention-days: 7

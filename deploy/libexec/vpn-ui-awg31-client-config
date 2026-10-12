@@ -1,0 +1,130 @@
+#!/usr/bin/python3
+"""Authenticated frontend's root-only AWG1 client config exporter.
+
+Called solely via the minimal sudo wrapper. No private material is logged.
+"""
+import base64
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+ROOT = pathlib.Path("/var/lib/vpn-ui/secure/amneziawg31")
+CONFIG = pathlib.Path("/etc/amnezia/amneziawg/awg1.conf")
+AWG_KEYS = (
+    "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
+    "H1", "H2", "H3", "H4",
+    "HeaderProtectionKey", "ContentPaddingAddition",
+    "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
+    "KeepaliveTimeout", "MaxHandshakeAttempts",
+    "RandomTrailers", "DisableCookies",
+)
+
+def die(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+def safe(value):
+    text = str(value or "").strip()
+    if "\n" in text or "\r" in text or "\x00" in text:
+        die("invalid inventory value")
+    return text
+
+def first(mapping, key):
+    value = mapping.get(key)
+    if isinstance(value, list):
+        return safe(value[0]) if value else ""
+    return safe(value)
+
+def interface_header(path):
+    fields = {}
+    in_interface = False
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line == "[Interface]":
+            in_interface = True
+            continue
+        if line.startswith("["):
+            in_interface = False
+        if in_interface and "=" in line and not line.startswith(("#", ";")):
+            key, value = (item.strip() for item in line.split("=", 1))
+            fields[key] = value
+    return fields
+
+key = sys.stdin.readline(128).strip()
+try:
+    if len(key) != 44 or len(base64.b64decode(key, validate=True)) != 32:
+        die("invalid public key")
+except (ValueError, base64.binascii.Error):
+    die("invalid public key")
+
+match = None
+for path in (ROOT / "clients").glob("*.json"):
+    record = json.loads(path.read_text())
+    if record.get("public_key") == key:
+        if match is not None:
+            die("duplicate client key")
+        match = record
+if match is None or match.get("provider") != "amneziawg31":
+    die("client not found")
+
+server = json.loads((ROOT / "server.json").read_text())
+fields = interface_header(CONFIG)
+if not fields.get("PrivateKey"):
+    die("server private key missing")
+
+pub = subprocess.run(
+    ["/usr/bin/awg", "pubkey"],
+    input=fields["PrivateKey"] + "\n",
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=True,
+).stdout.strip()
+
+options = match.get("interface_options") or {}
+if first(options, "HeaderProtectionKey") != fields.get("HeaderProtectionKey", ""):
+    die("HeaderProtectionKey changed; reissue client")
+if first(options, "RandomTrailers") != "on" or fields.get("RandomTrailers") != "on":
+    die("AWG 3.1 transport mismatch")
+
+ip = safe((match.get("allocated_ips") or [""])[0])
+private_key = safe(match.get("private_key"))
+psk = safe(match.get("preshared_key"))
+if not ip or not private_key or not psk:
+    die("incomplete client inventory")
+
+allowed = match.get("client_allowed_ips") or server.get("default_client_allowed_ips") or ["10.88.88.0/24"]
+endpoint = safe(match.get("endpoint") or server.get("default_endpoint"))
+if not endpoint:
+    die("client endpoint missing")
+
+lines = [
+    "[Interface]",
+    "PrivateKey = " + private_key,
+    "Address = " + ip,
+]
+dns = match.get("dns_servers") or server.get("default_dns_servers") or []
+if dns:
+    lines.append("DNS = " + ", ".join(safe(x) for x in dns))
+# The conservative client MTU can be tuned for the actual network path.
+lines.append("MTU = 1280")
+for setting in AWG_KEYS:
+    if setting in options:
+        value = first(options, setting)
+        if value:
+            lines.append(setting + " = " + value)
+
+lines += [
+    "",
+    "[Peer]",
+    "PublicKey = " + safe(pub),
+    "PresharedKey = " + psk,
+    "AllowedIPs = " + ", ".join(safe(x) for x in allowed),
+    "Endpoint = " + endpoint,
+]
+keepalive = safe(match.get("persistent_keepalive") or server.get("default_persistent_keepalive"))
+if keepalive:
+    lines.append("PersistentKeepalive = " + keepalive)
+sys.stdout.write("\n".join(lines) + "\n")

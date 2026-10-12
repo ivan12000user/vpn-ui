@@ -1,0 +1,28 @@
+#!/usr/bin/python3
+"""Read sanitized AWG1 peer names via privileged inventory API."""
+import json
+import subprocess
+import sys
+
+result = subprocess.run(
+    ["/usr/local/bin/vpn-ui-manage-awg31"],
+    input='{"op":"list"}\n',
+    text=True,
+    capture_output=True,
+    timeout=20,
+)
+if result.returncode:
+    print("AWG1 inventory helper failed", file=sys.stderr)
+    sys.exit(1)
+try:
+    payload = json.loads(result.stdout)
+    if payload.get("ok") is not True:
+        raise ValueError("unexpected response")
+    for peer in payload["peers"]:
+        key = peer["public_key"]
+        name = str(peer.get("name") or "").replace("\t", " ").replace("\n", " ")
+        if key and name:
+            print(f"{key}\t{name}")
+except (KeyError, ValueError, TypeError) as exc:
+    print("AWG1 inventory invalid", file=sys.stderr)
+    sys.exit(1)

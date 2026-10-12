@@ -1,5 +1,9 @@
 mod admin;
 mod geoip;
+mod html_polish;
+mod icon;
+mod settings_manage;
+mod tailscale;
 mod vpn;
 mod web;
 
@@ -43,6 +47,14 @@ async fn main() {
             interface: env::var("VPN_UI_AWG_INTERFACE").unwrap_or_else(|_| "awg0".to_string()),
         },
 
+        amneziawg31: ProviderConfig {
+            label: "AmneziaWG 3.1".to_string(),
+            command: env::var("VPN_UI_AWG31_COMMAND").unwrap_or_else(|_| "awg".to_string()),
+            metadata_command: env::var("VPN_UI_AWG31_METADATA_COMMAND")
+                .unwrap_or_else(|_| "vpn-ui-awg31-meta".to_string()),
+            interface: env::var("VPN_UI_AWG31_INTERFACE").unwrap_or_else(|_| "awg1".to_string()),
+        },
+
         ping_command: env::var("VPN_UI_PING_COMMAND")
             .unwrap_or_else(|_| "/usr/bin/ping".to_string()),
 
@@ -55,8 +67,14 @@ async fn main() {
         wg_client_config_command: env::var("VPN_UI_WG_CLIENT_CONFIG_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-wg-client-config".to_string()),
 
+        awg31_settings_command: env::var("VPN_UI_AWG31_SETTINGS_COMMAND")
+            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg31-settings".to_string()),
+
         awg_client_config_command: env::var("VPN_UI_AWG_CLIENT_CONFIG_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg-client-config".to_string()),
+
+        awg31_client_config_command: env::var("VPN_UI_AWG31_CLIENT_CONFIG_COMMAND")
+            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg31-client-config".to_string()),
 
         wg_manage_command: env::var("VPN_UI_WG_MANAGE_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-manage-wg".to_string()),
@@ -64,10 +82,20 @@ async fn main() {
         awg_manage_command: env::var("VPN_UI_AWG_MANAGE_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-manage-awg".to_string()),
 
+        awg31_manage_command: env::var("VPN_UI_AWG31_MANAGE_COMMAND")
+            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-manage-awg31".to_string()),
+
         geoip,
     };
 
-    let app = web::router(state).layer(TraceLayer::new_for_http());
+    let app = web::router(state.clone())
+        .merge(settings_manage::router(state))
+        .merge(icon::router())
+        .layer(axum::middleware::from_fn(
+            settings_manage::redirect_legacy_settings,
+        ))
+        .layer(axum::middleware::from_fn(html_polish::polish_html))
+        .layer(TraceLayer::new_for_http());
 
     let listen = env::var("VPN_UI_LISTEN").unwrap_or_else(|_| "127.0.0.1:8090".to_string());
 

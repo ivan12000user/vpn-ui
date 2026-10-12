@@ -1,0 +1,49 @@
+#!/usr/bin/python3
+"""Minimal privileged AWG1 status reader with key redaction.
+
+Never accepts arbitrary interface names, commands or paths.  Used by the
+unprivileged vpn-ui process through a narrowly scoped sudo rule.
+"""
+import subprocess
+import sys
+
+
+def sanitized_dump(output):
+    rows = output.splitlines()
+    if not rows:
+        raise ValueError("empty AWG1 status")
+    sanitized = []
+    for i, line in enumerate(rows):
+        parts = line.split("\t")
+        minimum = 3 if i == 0 else 7
+        if len(parts) < minimum:
+            raise ValueError("unexpected AWG1 dump format")
+        # Interface private key = first field. Peer preshared key = second.
+        # Do not expose either through the UI or the status API.
+        parts[0 if i == 0 else 1] = "(hidden)"
+        sanitized.append("\t".join(parts))
+    return "\n".join(sanitized) + "\n"
+
+
+def main():
+    if sys.argv[1:] != ["show", "awg1", "dump"]:
+        print("usage: vpn-ui-awg31-status show awg1 dump", file=sys.stderr)
+        return 64
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/awg", "show", "awg1", "dump"],
+            capture_output=True, text=True, timeout=15,
+            check=False,
+        )
+        if proc.returncode:
+            print("AWG1 status unavailable", file=sys.stderr)
+            return 1
+        sys.stdout.write(sanitized_dump(proc.stdout))
+        return 0
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        print("AWG1 status error: " + type(exc).__name__, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

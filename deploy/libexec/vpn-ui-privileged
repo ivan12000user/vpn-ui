@@ -1,0 +1,221 @@
+#!/bin/bash
+set -euo pipefail
+
+WG_BIN="/usr/bin/wg"
+AWG_BIN="/usr/bin/awg"
+
+WG_CONFIG="/etc/wireguard/wg0.conf"
+AWG_CONFIG="/etc/amnezia/amneziawg/awg0.conf"
+
+deny()
+{
+    echo "vpn-ui-privileged: operation denied" >&2
+    exit 64
+}
+
+sanitized_dump()
+{
+    local bin="$1"
+    local interface="$2"
+
+    "$bin" show "$interface" dump |
+        awk -F '\t' '
+            BEGIN { OFS="\t" }
+            NR == 1 { $1="[REDACTED]" }
+            NR > 1  { $2="[REDACTED]" }
+            { print }
+        '
+}
+
+wg_names()
+{
+    awk '
+        BEGIN {
+            name=""
+            inpeer=0
+        }
+
+        /^\[Peer\][[:space:]]*$/ {
+            inpeer=1
+            next
+        }
+
+        /^\[/ && !/^\[Peer\][[:space:]]*$/ {
+            inpeer=0
+            name=""
+        }
+
+        /^#[[:space:]]*Name:[[:space:]]*/ {
+            line=$0
+            sub(/^#[[:space:]]*Name:[[:space:]]*/, "", line)
+            name=line
+            next
+        }
+
+        inpeer && /^[[:space:]]*PublicKey[[:space:]]*=/ {
+            line=$0
+            sub(/^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*/, "", line)
+
+            if (name != "")
+                printf "%s\t%s\n", line, name
+
+            name=""
+        }
+    ' "$WG_CONFIG"
+}
+
+awg_names()
+{
+    local file base name private public
+
+    shopt -s nullglob
+
+    for file in /etc/amnezia/amneziawg/clients/awg0-client-*.conf
+    do
+        base="${file##*/}"
+        name="${base#awg0-client-}"
+        name="${name%.conf}"
+
+        private="$(
+            awk '
+                BEGIN { in_interface=0 }
+
+                /^[[:space:]]*\[Interface\][[:space:]]*$/ {
+                    in_interface=1
+                    next
+                }
+
+                /^[[:space:]]*\[/ {
+                    in_interface=0
+                }
+
+                in_interface &&
+                /^[[:space:]]*PrivateKey[[:space:]]*=/ {
+                    line=$0
+                    sub(/^[^=]*=[[:space:]]*/, "", line)
+                    gsub(/[[:space:]]+$/, "", line)
+                    print line
+                    exit
+                }
+            ' "$file"
+        )"
+
+        [ -n "$private" ] || continue
+
+        public="$(
+            printf '%s
+' "$private" |
+            "$AWG_BIN" pubkey
+        )"
+
+        [ -n "$public" ] || continue
+
+        printf '%s	%s
+' "$public" "$name"
+    done
+}
+
+wg_settings()
+{
+    awk -F '=' '
+        BEGIN { OFS="\t"; in_interface=0 }
+
+        /^[[:space:]]*\[Interface\][[:space:]]*$/ {
+            in_interface=1
+            next
+        }
+
+        /^[[:space:]]*\[/ && !/^[[:space:]]*\[Interface\][[:space:]]*$/ {
+            in_interface=0
+        }
+
+        in_interface {
+            key=$1
+            value=$0
+
+            sub(/^[^=]*=/, "", value)
+
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+
+            if (key == "Address" ||
+                key == "ListenPort" ||
+                key == "MTU" ||
+                key == "Table")
+                print key, value
+        }
+    ' "$WG_CONFIG"
+}
+
+awg_settings()
+{
+    awk -F '=' '
+        BEGIN { OFS="\t"; in_interface=0 }
+
+        /^[[:space:]]*\[Interface\][[:space:]]*$/ {
+            in_interface=1
+            next
+        }
+
+        /^[[:space:]]*\[/ && !/^[[:space:]]*\[Interface\][[:space:]]*$/ {
+            in_interface=0
+        }
+
+        in_interface {
+            key=$1
+            value=$0
+
+            sub(/^[^=]*=/, "", value)
+
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+
+            if (key == "Address" ||
+                key == "ListenPort" ||
+                key == "Jc" ||
+                key == "Jmin" ||
+                key == "Jmax" ||
+                key == "S1" ||
+                key == "S2" ||
+                key == "S3" ||
+                key == "S4" ||
+                key == "H1" ||
+                key == "H2" ||
+                key == "H3" ||
+                key == "H4")
+                print key, value
+        }
+    ' "$AWG_CONFIG"
+}
+
+[ "$#" -eq 4 ] || deny
+
+case "$1|$2|$3|$4" in
+    'wg|show|wg0|dump')
+        sanitized_dump "$WG_BIN" wg0
+        ;;
+
+    'awg|show|awg0|dump')
+        sanitized_dump "$AWG_BIN" awg0
+        ;;
+
+    'wg|metadata|wg0|names')
+        wg_names
+        ;;
+
+    'awg|metadata|awg0|names')
+        awg_names
+        ;;
+
+    'wg|settings|wg0|show')
+        wg_settings
+        ;;
+
+    'awg|settings|awg0|show')
+        awg_settings
+        ;;
+
+    *)
+        deny
+        ;;
+esac

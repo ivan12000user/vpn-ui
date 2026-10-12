@@ -1,0 +1,7 @@
+# Additional commands ONLY for AWG 3.1 (awg1).
+# Install to /etc/sudoers.d/vpn-ui-awg31 with root:root, 0440.
+# Always check with visudo -cf before using.
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-awg31-status show awg1 dump
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-manage amneziawg31
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-awg31-settings ""
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-awg31-client-config ""

@@ -1,5 +1,6 @@
 use crate::{
     geoip::{GeoIpService, enrich_status},
+    tailscale,
     vpn::{
         amneziawg,
         common::{InterfaceStatus, PeerStatus, PingResult, ProviderConfig, now_epoch, ping_ip},
@@ -20,15 +21,19 @@ use tokio::process::Command;
 pub struct AppState {
     pub wireguard: ProviderConfig,
     pub amneziawg: ProviderConfig,
+    pub amneziawg31: ProviderConfig,
     pub ping_command: String,
     pub wg_settings_command: String,
     pub awg_settings_command: String,
+    pub awg31_settings_command: String,
 
     pub wg_client_config_command: String,
     pub awg_client_config_command: String,
+    pub awg31_client_config_command: String,
 
     pub wg_manage_command: String,
     pub awg_manage_command: String,
+    pub awg31_manage_command: String,
 
     pub geoip: GeoIpService,
 }
@@ -56,6 +61,9 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(dashboard))
         .route("/wireguard", get(wireguard_page))
         .route("/amneziawg", get(amneziawg_page))
+        .route("/amneziawg31", get(amneziawg31_page))
+        .route("/tailscale", get(tailscale_page))
+        .route("/api/tailscale/status", get(tailscale_api))
         .route("/settings", get(settings_page))
         .route("/api/admin/auth", get(admin_auth))
         .route("/admin/client", get(crate::admin::client_page))
@@ -72,11 +80,18 @@ pub fn router(state: AppState) -> Router {
             post(crate::admin::amneziawg_manage),
         )
         .route("/api/wireguard/inventory", get(wireguard_inventory))
+        .route(
+            "/api/admin/amneziawg31/manage",
+            post(crate::admin::amneziawg31_manage),
+        )
         .route("/api/amneziawg/inventory", get(amneziawg_inventory))
+        .route("/api/amneziawg31/inventory", get(amneziawg31_inventory))
         .route("/api/wireguard/status", get(wireguard_api))
         .route("/api/amneziawg/status", get(amneziawg_api))
+        .route("/api/amneziawg31/status", get(amneziawg31_api))
         .route("/api/wireguard/ping", post(wireguard_ping))
         .route("/api/amneziawg/ping", post(amneziawg_ping))
+        .route("/api/amneziawg31/ping", post(amneziawg31_ping))
         .route("/healthz", get(health))
         .with_state(state)
 }
@@ -105,9 +120,11 @@ async fn admin_auth() -> impl IntoResponse {
 }
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
-    let (wg, awg) = tokio::join!(
+    let (wg, awg, awg31, ts) = tokio::join!(
         wireguard::status(&state.wireguard),
-        amneziawg::status(&state.amneziawg)
+        amneziawg::status(&state.amneziawg),
+        amneziawg::status(&state.amneziawg31),
+        tailscale::status()
     );
 
     let body = format!(
@@ -118,12 +135,16 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
 <div class="cards">
   {}
   {}
+  {}
+  {}
 </div>
 
 <p class="muted">Версия {}.</p>
 "#,
         dashboard_card("/wireguard", &wg),
         dashboard_card("/amneziawg", &awg),
+        dashboard_card("/amneziawg31", &awg31),
+        tailscale_dashboard_card(&ts),
         env!("CARGO_PKG_VERSION")
     );
 
@@ -142,12 +163,25 @@ async fn amneziawg_page(State(state): State<AppState>) -> impl IntoResponse {
     Html(layout("AmneziaWG", &provider_page("amneziawg", &status)))
 }
 
+async fn amneziawg31_page(State(state): State<AppState>) -> impl IntoResponse {
+    let mut status = amneziawg::status(&state.amneziawg31).await;
+    enrich_status(&state.geoip, &mut status).await;
+    Html(layout(
+        "AmneziaWG 3.1",
+        &provider_page("amneziawg31", &status),
+    ))
+}
+
 async fn wireguard_inventory(State(state): State<AppState>) -> impl IntoResponse {
     inventory_api(&state.wg_manage_command).await
 }
 
 async fn amneziawg_inventory(State(state): State<AppState>) -> impl IntoResponse {
     inventory_api(&state.awg_manage_command).await
+}
+
+async fn amneziawg31_inventory(State(state): State<AppState>) -> impl IntoResponse {
+    inventory_api(&state.awg31_manage_command).await
 }
 
 async fn inventory_api(command: &str) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
@@ -319,6 +353,12 @@ async fn amneziawg_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
     Json(status)
 }
 
+async fn amneziawg31_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
+    let mut status = amneziawg::status(&state.amneziawg31).await;
+    enrich_status(&state.geoip, &mut status).await;
+    Json(status)
+}
+
 async fn wireguard_ping(
     State(state): State<AppState>,
     Json(request): Json<PingRequest>,
@@ -332,6 +372,14 @@ async fn amneziawg_ping(
     Json(request): Json<PingRequest>,
 ) -> Json<PingResult> {
     let status = amneziawg::status(&state.amneziawg).await;
+    Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
+}
+
+async fn amneziawg31_ping(
+    State(state): State<AppState>,
+    Json(request): Json<PingRequest>,
+) -> Json<PingResult> {
+    let status = amneziawg::status(&state.amneziawg31).await;
     Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
 }
 
@@ -365,6 +413,137 @@ async fn ping_known_peer(
     };
 
     ping_ip(ping_command, ip).await
+}
+
+async fn tailscale_api() -> Json<tailscale::TailStatus> {
+    Json(tailscale::status().await)
+}
+
+async fn tailscale_page() -> impl IntoResponse {
+    let status = tailscale::status().await;
+    Html(layout("Tailscale", &tailscale_page_body(&status)))
+}
+
+fn tailscale_dashboard_card(status: &tailscale::TailStatus) -> String {
+    let available = status.backend_state == "Running" && status.error.is_none();
+    let state_class = if available { "ok" } else { "error" };
+    let state_text = if available { "ONLINE" } else { "UNAVAILABLE" };
+    format!(
+        r#"<a class="card" href="/tailscale">
+          <div class="card-head"><h2>Tailscale</h2><span class="badge {state_class}">{state_text}</span></div>
+          <div class="value">tailscale0</div>
+          <div class="muted mono">{ip}</div>
+          <div class="metric"><strong class="metric-online">{online}</strong> онлайн
+          <span class="metric-separator">/</span><strong>{total}</strong> видимых</div>
+        </a>"#,
+        ip = escape_html(if status.self_ip.is_empty() {
+            "—"
+        } else {
+            &status.self_ip
+        }),
+        online = status.online_count,
+        total = status.peers.len(),
+    )
+}
+
+fn tailscale_rows(status: &tailscale::TailStatus) -> String {
+    let mut rows = String::new();
+    for peer in &status.peers {
+        let state = if peer.online { "ONLINE" } else { "OFFLINE" };
+        let state_class = if peer.online { "ok" } else { "offline" };
+        let traffic = if peer.active {
+            "Активен"
+        } else {
+            "Нет обмена"
+        };
+        let exit = if peer.exit_node_option { "Да" } else { "—" };
+        rows.push_str(&format!(
+            r#"<tr class="status-{state_class}">
+                <td class="peer-name-cell" data-label="Имя"><strong class="peer-name">{name}</strong></td>
+                <td class="mono" data-label="Tailscale IP">{ip}</td>
+                <td data-label="Статус">{state}</td>
+                <td data-label="Обмен">{traffic}</td>
+                <td data-label="Exit-node">{exit}</td>
+                <td data-label="Relay">{relay}</td>
+                <td data-label="Владелец">{owner}</td>
+               </tr>"#,
+            name = escape_html(&peer.hostname),
+            ip = escape_html(&peer.ip),
+            relay = escape_html(if peer.relay.is_empty() { "—" } else { &peer.relay }),
+            owner = escape_html(if peer.owner.is_empty() { "—" } else { &peer.owner }),
+        ));
+    }
+    rows
+}
+
+fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
+    let error = status.error.as_deref().unwrap_or("");
+    let error_html = if error.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="alert error" id="ts-initial-error">{}</div>"#,
+            escape_html(error)
+        )
+    };
+    let status_name = if status.backend_state.is_empty() {
+        "—"
+    } else {
+        &status.backend_state
+    };
+    let hostname = if status.self_hostname.is_empty() {
+        "—"
+    } else {
+        &status.self_hostname
+    };
+    let ip = if status.self_ip.is_empty() {
+        "—"
+    } else {
+        &status.self_ip
+    };
+    let exit = if status.self_exit_node_option {
+        "Предлагается"
+    } else {
+        "Нет"
+    };
+    format!(
+        r#"<div class="page-head">
+          <div><h1>Tailscale</h1><p class="lead">Локально видимые участники сети (только просмотр)</p></div>
+          <div class="toolbar">
+            <button id="ts-refresh" class="button" type="button">↻ Обновить</button>
+            <input id="ts-filter" class="filter-input" type="search" placeholder="Поиск..." autocomplete="off">
+            <label class="auto-refresh"><input id="ts-auto" type="checkbox" checked> Автообновление</label>
+            <span id="ts-updated" class="muted">—</span>
+          </div>
+        </div>
+        <div id="ts-error">{error_html}</div>
+        <div class="summary">
+          <div><span>Устройство</span><strong id="ts-self">{hostname}</strong></div>
+          <div><span>Tailscale IP</span><strong id="ts-ip">{ip}</strong></div>
+          <div><span>Видно / онлайн</span><strong id="ts-count">{total} / {online}</strong></div>
+          <div><span>Exit-node / статус</span><strong id="ts-exit">{exit} · {backend}</strong></div>
+        </div>
+        <div class="panel">
+          <h2>Участники Tailscale</h2>
+          <div class="table-wrap tailscale-table">
+            <table>
+              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th></tr></thead>
+              <tbody id="tailscale-rows">{rows}</tbody>
+            </table>
+          </div>
+          <p class="muted" style="margin-top:16px">
+            Показаны только узлы, видимые этому VPS. Список приглашённых пользователей,
+            которым расшарен exit-node, сюда не входит; он требует административных данных Tailscale.
+          </p>
+        </div>"#,
+        hostname = escape_html(hostname),
+        ip = escape_html(ip),
+        total = status.peers.len(),
+        online = status.online_count,
+        exit = exit,
+        backend = escape_html(status_name),
+        rows = tailscale_rows(status),
+    )
 }
 
 fn dashboard_card(path: &str, status: &InterfaceStatus) -> String {
@@ -594,10 +773,18 @@ fn provider_page(provider_id: &str, status: &InterfaceStatus) -> String {
         .filter(|peer| handshake_status(peer.latest_handshake).0 == "ok")
         .count();
 
-    let peers = if status.peers.is_empty() {
-        r#"<div class="empty">Пиры не найдены.</div>"#.to_string()
+    // Always render the table and tbody, even for an initially empty VPN.
+    // Otherwise, JavaScript cannot insert the first peer without reloading.
+    let peers = peer_table(provider_id, &status.peers);
+    let empty_class = if status.peers.is_empty() {
+        ""
     } else {
-        peer_table(provider_id, &status.peers)
+        " hidden"
+    };
+    let table_class = if status.peers.is_empty() {
+        " hidden"
+    } else {
+        ""
     };
 
     format!(
@@ -673,7 +860,10 @@ window.VPN_UI_PROVIDER = "{provider_id}";
 
 <div class="panel">
   <h2>Пиры</h2>
-  {peers}
+  <div id="peers-empty" class="empty{empty_class}">Пиры не найдены.</div>
+  <div id="peers-table" class="peers-table-container{table_class}">
+    {peers}
+  </div>
 </div>
 
 <div
@@ -791,6 +981,8 @@ window.VPN_UI_PROVIDER = "{provider_id}";
         interface = escape_html(&status.interface),
         peer_count = status.peers.len(),
         online_count = online_count,
+        empty_class = empty_class,
+        table_class = table_class,
     )
 }
 
@@ -2207,6 +2399,36 @@ body.modal-open {
     font-size: 10px;
   }
 }
+
+/* Tailscale rows have no VPN peer public-key; make them mobile cards too. */
+.tailscale-table tr[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 900px) {
+  .tailscale-table tbody tr {
+    display: grid;
+    grid-template-columns: 1fr;
+    padding: 14px;
+    min-width: 0;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--muted);
+    border-radius: 10px;
+  }
+  .tailscale-table tbody tr.status-ok {
+    border-left-color: var(--green);
+  }
+  .tailscale-table tbody tr.status-offline {
+    border-left-color: var(--red);
+  }
+  .tailscale-table tbody td {
+    display: grid;
+    grid-template-columns: minmax(108px, 38%) minmax(0, 1fr);
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
 "#;
 
 const SCRIPT: &str = r#"
@@ -3582,6 +3804,14 @@ const SCRIPT: &str = r#"
           inventoryData.peers
         );
 
+      // Handle 0 -> 1 and 1 -> 0 peers without a browser reload.
+      // Both containers (including tbody) are rendered server-side.
+      const hasPeers = inventoryData.peers.length > 0;
+      document.getElementById("peers-empty")
+        ?.classList.toggle("hidden", hasPeers);
+      document.getElementById("peers-table")
+        ?.classList.toggle("hidden", !hasPeers);
+
       const peerMap =
         new Map(
           mergedPeers.map(
@@ -3858,10 +4088,88 @@ const SCRIPT: &str = r#"
 })();
 "#;
 
+const TAILSCALE_SCRIPT: &str = r#"
+(() => {
+  const tbody = document.getElementById('tailscale-rows');
+  if (!tbody) return;
+  const refresh = document.getElementById('ts-refresh');
+  const auto = document.getElementById('ts-auto');
+  const updated = document.getElementById('ts-updated');
+  const filter = document.getElementById('ts-filter');
+  const errors = document.getElementById('ts-error');
+  let running = false;
+
+  const val = value => value || '—';
+  function cell(row, label, value, css) {
+    const td = document.createElement('td');
+    td.dataset.label = label;
+    if (css) td.className = css;
+    td.textContent = value;
+    row.appendChild(td);
+  }
+  function render(data) {
+    tbody.replaceChildren();
+    for (const peer of (data.peers || [])) {
+      const tr = document.createElement('tr');
+      tr.className = peer.online ? 'status-ok' : 'status-offline';
+      cell(tr, 'Имя', val(peer.hostname), 'peer-name-cell');
+      cell(tr, 'Tailscale IP', val(peer.ip), 'mono');
+      cell(tr, 'Статус', peer.online ? 'ONLINE' : 'OFFLINE');
+      cell(tr, 'Обмен', peer.active ? 'Активен' : 'Нет обмена');
+      cell(tr, 'Exit-node', peer.exit_node_option ? 'Да' : '—');
+      cell(tr, 'Relay', val(peer.relay));
+      cell(tr, 'Владелец', val(peer.owner));
+      tbody.appendChild(tr);
+    }
+    document.getElementById('ts-self').textContent = val(data.self_hostname);
+    document.getElementById('ts-ip').textContent = val(data.self_ip);
+    document.getElementById('ts-count').textContent = (data.peers || []).length + ' / ' + (data.online_count || 0);
+    document.getElementById('ts-exit').textContent =
+      (data.self_exit_node_option ? 'Предлагается' : 'Нет') + ' · ' + val(data.backend_state);
+    errors.textContent = data.error ? 'Не удалось получить Tailscale: ' + data.error : '';
+    errors.className = data.error ? 'alert error' : '';
+    filterRows();
+  }
+  function filterRows() {
+    const query = filter.value.trim().toLocaleLowerCase('ru');
+    for (const tr of tbody.rows) {
+      tr.hidden = query !== '' && !tr.textContent.toLocaleLowerCase('ru').includes(query);
+    }
+  }
+  async function poll() {
+    if (running) return;
+    running = true;
+    refresh.disabled = true;
+    try {
+      const result = await fetch('/api/tailscale/status', {cache:'no-store'});
+      if (!result.ok) throw new Error('HTTP ' + result.status);
+      render(await result.json());
+      updated.textContent = 'Обновлено ' + new Date().toLocaleTimeString();
+    } catch (e) {
+      updated.textContent = 'Нет связи';
+      errors.textContent = String(e);
+      errors.className = 'alert error';
+    } finally {
+      refresh.disabled = false;
+      running = false;
+    }
+  }
+  refresh.addEventListener('click', poll);
+  filter.addEventListener('input', filterRows);
+  setInterval(() => { if (auto.checked && !document.hidden) poll(); }, 15000);
+})();
+"#;
+
 pub(crate) fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
     let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
+    let amneziawg31_active = if title == "AmneziaWG 3.1" {
+        " active"
+    } else {
+        ""
+    };
+    let tailscale_active = if title == "Tailscale" { " active" } else { "" };
     let settings_active = if title == "Настройки" {
         " active"
     } else {
@@ -3883,20 +4191,81 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
   <div class="brand">VPN UI</div>
   <a class="nav-link{overview_active}" href="/">Обзор</a>
   <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-  <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG</a>
+  <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
+  <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
+  <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
   <a class="nav-link{settings_active}" href="/settings">Настройки</a>
 </nav>
 <main>{body}</main>
 </div>
 <script>{script}</script>
+<script>{tailscale_script}</script>
 </body>
 </html>"#,
         title = escape_html(title),
         style = STYLE,
         script = SCRIPT,
+        tailscale_script = TAILSCALE_SCRIPT,
         overview_active = overview_active,
         wireguard_active = wireguard_active,
         amneziawg_active = amneziawg_active,
+        amneziawg31_active = amneziawg31_active,
+        tailscale_active = tailscale_active,
         settings_active = settings_active,
     )
+}
+
+#[cfg(test)]
+mod empty_peer_table_tests {
+    use super::*;
+
+    #[test]
+    fn initial_empty_page_keeps_hidden_table_for_first_peer() {
+        let status = InterfaceStatus {
+            provider: "AmneziaWG 3.1".into(),
+            interface: "awg1".into(),
+            public_key: None,
+            listen_port: Some(8444),
+            peers: Vec::new(),
+            error: None,
+        };
+        let page = provider_page("amneziawg31", &status);
+        assert!(page.contains("id=\"peers-empty\" class=\"empty\""));
+        assert!(page.contains("id=\"peers-table\" class=\"peers-table-container hidden\""));
+        assert!(
+            page.contains("<tbody>"),
+            "tbody must exist for dynamic reconciliation"
+        );
+        assert!(SCRIPT.contains("const hasPeers = inventoryData.peers.length > 0;"));
+        assert!(SCRIPT.contains("?.classList.toggle(\"hidden\", hasPeers)"));
+        assert!(SCRIPT.contains("?.classList.toggle(\"hidden\", !hasPeers)"));
+    }
+
+    #[test]
+    fn initial_nonempty_page_hides_empty_message() {
+        let status = InterfaceStatus {
+            provider: "AmneziaWG 3.1".into(),
+            interface: "awg1".into(),
+            public_key: None,
+            listen_port: Some(8444),
+            peers: vec![PeerStatus {
+                public_key: "TEST_PEER_PUBLIC_KEY".into(),
+                name: Some("surface-awg31-test".into()),
+                vpn_ip: Some("10.88.88.2".into()),
+                endpoint: None,
+                allowed_ips: "10.88.88.2/32".into(),
+                latest_handshake: None,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                persistent_keepalive: Some(25),
+                geo_provider: None,
+                geo_location: None,
+            }],
+            error: None,
+        };
+        let page = provider_page("amneziawg31", &status);
+        assert!(page.contains("id=\"peers-empty\" class=\"empty hidden\""));
+        assert!(page.contains("id=\"peers-table\" class=\"peers-table-container\""));
+        assert!(page.contains("data-peer-key=\"TEST_PEER_PUBLIC_KEY\""));
+    }
 }

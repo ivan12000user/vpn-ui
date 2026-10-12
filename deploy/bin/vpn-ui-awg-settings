@@ -1,0 +1,4 @@
+#!/bin/sh
+exec /usr/bin/sudo -n \
+    /usr/local/libexec/vpn-ui-privileged \
+    awg settings awg0 show

@@ -1,0 +1,2 @@
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-manage wireguard
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-manage amneziawg

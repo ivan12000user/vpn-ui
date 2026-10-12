@@ -1,0 +1,84 @@
+name: Audit pinned AWG 3.1 upstream source
+
+on:
+  push:
+    branches:
+      - integration/v080-awg31-tailscale-prep-20261011
+    paths:
+      - .github/workflows/audit-awg31-upstream.yml
+      - deploy/RELEASE_READINESS.md
+
+permissions:
+  contents: read
+
+jobs:
+  build-upstream:
+    name: Source provenance and userspace build (no VPN)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Install exact Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.12'
+          cache: false
+
+      - name: Fetch exact upstream source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v3.1.20260828 --single-branch \
+            https://github.com/amnezia-vpn/amneziawg-go.git upstream
+          actual="$(git -C upstream rev-parse HEAD)"
+          expected="b5928efb6ca19f0153958460c3d141f04abc5c2e"
+          echo "Verified source commit: $actual"
+          test "$actual" = "$expected"
+          test -f upstream/LICENSE
+          grep -q 'Permission is hereby granted' upstream/LICENSE
+          grep -q '^go 1.25.0$' upstream/go.mod
+
+      - name: Build Go 1.25.12 dynamic and static binaries without running them
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          make
+          file ./amneziawg-go
+          sha256sum ./amneziawg-go
+          go version -m ./amneziawg-go
+
+          CGO_ENABLED=0 go build -v -o ./amneziawg-go-static .
+          file ./amneziawg-go-static
+          sha256sum ./amneziawg-go-static
+          go version -m ./amneziawg-go-static
+
+          # Recreate the installed binary's reported CGO=1 and missing VCS
+          # metadata without changing or executing any live binary.
+          CGO_ENABLED=1 go build -buildvcs=false -o ./amneziawg-go-cgo-no-vcs .
+          file ./amneziawg-go-cgo-no-vcs
+          sha256sum ./amneziawg-go-cgo-no-vcs
+          go version -m ./amneziawg-go-cgo-no-vcs
+
+          # An explicit external static-link attempt, kept separate from the
+          # ordinary build to identify toolchain and linker effects.
+          CGO_ENABLED=1 go build -buildvcs=false -tags netgo,osusergo \
+            -ldflags '-linkmode external -extldflags -static' \
+            -o ./amneziawg-go-cgo-static .
+          file ./amneziawg-go-cgo-static
+          sha256sum ./amneziawg-go-cgo-static
+          go version -m ./amneziawg-go-cgo-static
+
+      - name: Compare static output to audited production checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=6177066f0e35b1cb44945136d9a10841dd3ce30fdf16009c9a815cd943a982fe
+          for binary in amneziawg-go amneziawg-go-static amneziawg-go-cgo-no-vcs amneziawg-go-cgo-static; do
+            actual="$(sha256sum "upstream/$binary" | awk '{print $1}')"
+            if [ "$actual" = "$expected" ]; then
+              echo "$binary: MATCHES audited VPS SHA256"
+            else
+              echo "$binary: does not match audited VPS SHA256"
+            fi
+          done
+          echo "Unprivileged source builds only. No production keys, VPN devices or tunnel access."

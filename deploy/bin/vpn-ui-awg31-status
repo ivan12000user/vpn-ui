@@ -1,0 +1,3 @@
+#!/bin/sh
+# The command args are fixed in sudoers and verified again by the root helper.
+exec /usr/bin/sudo -n /usr/local/libexec/vpn-ui-awg31-status "$@"

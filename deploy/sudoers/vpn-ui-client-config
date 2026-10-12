@@ -1,0 +1,2 @@
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-client-config wg wg0
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-client-config awg awg0
