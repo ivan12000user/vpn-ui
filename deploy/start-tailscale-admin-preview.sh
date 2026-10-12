@@ -91,7 +91,7 @@ fi
 # Only check HTML marker; do not print user identities, secret invite URLs,
 # or invite responses.
 curl -fsS --max-time 5 "$BASE/tailscale" |
-    grep -Fq 'ts-directory-refresh' || {
+    grep -F 'ts-directory-refresh' >/dev/null || {
         echo "Unexpected Tailscale page; stopping temporary unit" >&2
         systemctl stop "$UNIT" >/dev/null 2>&1 || true
         exit 1
