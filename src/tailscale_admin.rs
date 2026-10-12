@@ -86,7 +86,11 @@ fn read_users(doc: &Value) -> Result<Vec<DirectoryUser>, &'static str> {
             device_count: u.get("deviceCount").and_then(Value::as_u64),
         });
     }
-    users.sort_by(|a, b| a.login_name.to_lowercase().cmp(&b.login_name.to_lowercase()));
+    users.sort_by(|a, b| {
+        a.login_name
+            .to_lowercase()
+            .cmp(&b.login_name.to_lowercase())
+    });
     Ok(users)
 }
 
@@ -147,16 +151,15 @@ fn read_invites(doc: &Value, device: &str) -> Result<Vec<DeviceInvite>, &'static
             accepted: invite.get("accepted").and_then(Value::as_bool),
             allow_exit_node: invite.get("allowExitNode").and_then(Value::as_bool),
             created: field(invite, "created"),
-            multi_use: invite.get("multiUse").and_then(Value::as_bool).unwrap_or(false),
+            multi_use: invite
+                .get("multiUse")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
         .collect())
 }
 
-async fn get_json(
-    client: &reqwest::Client,
-    token: &str,
-    route: &str,
-) -> Result<Value, String> {
+async fn get_json(client: &reqwest::Client, token: &str, route: &str) -> Result<Value, String> {
     // URL host is hard-coded. Never accept a user-controlled API base URL.
     let response = client
         .get(format!("{API_BASE}/{route}"))
@@ -186,7 +189,9 @@ async fn collect(tailnet: &str, token: &str) -> ShareDirectory {
     {
         Ok(c) => c,
         Err(_) => {
-            output.warnings.push("Cannot initialize HTTPS client".into());
+            output
+                .warnings
+                .push("Cannot initialize HTTPS client".into());
             return output;
         }
     };
@@ -321,7 +326,8 @@ mod tests {
         let users = read_users(&json!({"users":[
             {"loginName":"alice@example.test","type":"shared"},
             {"loginName":"bob@example.test","currentlyConnected":false}
-        ]})).unwrap();
+        ]}))
+        .unwrap();
         assert_eq!(users[0].currently_connected, None);
         assert_eq!(users[1].currently_connected, Some(false));
     }
@@ -329,7 +335,12 @@ mod tests {
     #[test]
     fn supports_empty_and_wrapped_invites() {
         assert_eq!(read_invites(&Value::Null, "VPS").unwrap().len(), 0);
-        assert_eq!(read_invites(&json!({"deviceInvites":[]}), "VPS").unwrap().len(), 0);
+        assert_eq!(
+            read_invites(&json!({"deviceInvites":[]}), "VPS")
+                .unwrap()
+                .len(),
+            0
+        );
         assert!(read_invites(&json!({"unexpected":[]}), "VPS").is_err());
     }
 
@@ -341,7 +352,6 @@ mod tests {
         assert!(safe_id("owner@example.com"));
     }
 }
-
 
 pub const PANEL: &str = r#"
 <section class="panel" id="ts-directory">
