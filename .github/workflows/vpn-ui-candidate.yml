@@ -93,3 +93,72 @@ jobs:
           path: release-artifact/
           if-no-files-found: error
           retention-days: 7
+
+  wsl-jammy-build:
+    name: Ubuntu 22.04 WSL compatibility
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout pinned candidate
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.98 for Ubuntu 22.04
+        run: rustup toolchain install 1.98.0 --profile minimal
+
+      - name: Build Jammy-compatible release binary
+        run: cargo +1.98.0 build --release --locked
+
+      - name: Verify glibc compatibility with Z270 Ubuntu 22.04
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd --version | head -1
+          python3 - <<'PY'
+          import re
+          import subprocess
+
+          binary = "target/release/vpn-ui"
+          output = subprocess.check_output(
+              ["readelf", "--version-info", binary], text=True
+          )
+          needed = sorted({
+              tuple(map(int, match))
+              for match in re.findall(r"GLIBC_(\d+)\.(\d+)", output)
+          })
+          print("GLIBC requirements:", ", ".join(
+              f"{major}.{minor}" for major, minor in needed
+          ))
+          if needed and max(needed) > (2, 35):
+              raise SystemExit(
+                  f"FAIL: binary needs GLIBC_{max(needed)[0]}.{max(needed)[1]}, "
+                  "Z270 Ubuntu 22.04 provides GLIBC_2.35"
+              )
+          print("GLIBC 2.35 COMPATIBILITY PASS")
+          PY
+
+      - name: Test executable on real Ubuntu 22.04 localhost
+        run: bash tests/smoke_web_local.sh
+
+      - name: Verify disposable install file layout
+        run: python3 tests/stage_deployment.py
+
+      - name: Package verified Ubuntu 22.04 binary
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0755 release-jammy
+          install -m 0755 target/release/vpn-ui release-jammy/vpn-ui
+          (cd release-jammy && sha256sum vpn-ui > SHA256SUMS)
+          printf '%s\n' "$GITHUB_SHA" > release-jammy/SOURCE_COMMIT
+          printf '%s\n' "ubuntu-22.04 glibc-2.35 amd64" > release-jammy/BUILD_PLATFORM
+          cat release-jammy/SHA256SUMS
+
+      - name: Upload Z270 WSL Jammy compatibility artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpn-ui-v080-ubuntu2204-z270-amd64
+          path: release-jammy/
+          if-no-files-found: error
+          retention-days: 7
