@@ -26,11 +26,23 @@ JSON
 EOF
 chmod 0755 "$tmp/tailscale-ro"
 
+# Fake restricted native helper input/output.
+cat > "$tmp/tailscale-native" <<'EOF'
+#!/bin/sh
+IFS= read -r ip || exit 1
+[ "$ip" = "100.92.11.114" ] || exit 64
+echo 'pong from lab-peer (100.92.11.114) via DERP(ams) in 148ms'
+echo 'pong from lab-peer (100.92.11.114) via DERP(ams) in 217ms'
+echo 'direct connection not established'
+EOF
+chmod 0755 "$tmp/tailscale-native"
+
 # Fixed nonprivileged localhost port on isolated GitHub runner.
 base="http://127.0.0.1:18790"
 env \
   VPN_UI_TAILSCALE_COMMAND="$tmp/tailscale-ro" \
   VPN_UI_PING_COMMAND=/usr/bin/false \
+  VPN_UI_TS_PING_COMMAND="$tmp/tailscale-native" \
   VPN_UI_LISTEN=127.0.0.1:18790 \
   VPN_UI_GEOIP_CACHE="$tmp/geoip.json" \
   VPN_UI_WG_COMMAND=/usr/bin/false \
@@ -132,5 +144,30 @@ for rejected in (unknown, loopback):
     assert rejected["error"] == "Tailscale peer not found", rejected
 print("TAILSCALE PING WHITELIST PASS")
 PY
+
+# Native ping is distinct from normal ICMP; it never probes arbitrary IPs.
+curl --silent --show-error --fail --max-time 12 \
+  -H 'Content-Type: application/json' \
+  --data '{"ip":"100.92.11.114"}' \
+  "$base/api/tailscale/overlay-ping" -o "$tmp/ts-native-known.json"
+curl --silent --show-error --fail --max-time 12 \
+  -H 'Content-Type: application/json' \
+  --data '{"ip":"127.0.0.1"}' \
+  "$base/api/tailscale/overlay-ping" -o "$tmp/ts-native-denied.json"
+python3 - "$tmp/ts-native-known.json" "$tmp/ts-native-denied.json" <<'PY'
+import json,sys
+a,b=(json.load(open(x)) for x in sys.argv[1:])
+assert a["ok"] is True, a
+assert a["path"] == "DERP" and a["relay"] == "ams", a
+assert a["received"] == 2, a
+assert abs(a["avg_ms"]-182.5)<0.01, a
+assert b["ok"] is False and b["ip"] == "", b
+print("TAILSCALE NATIVE DERP PING PASS")
+PY
+curl --silent --show-error --fail --max-time 10 "$base/tailscale" -o "$tmp/ts-page.html"
+grep -F '<th>Tailscale ping</th>' "$tmp/ts-page.html" >/dev/null
+grep -F '<th>ICMP</th>' "$tmp/ts-page.html" >/dev/null
+grep -F 'Проверить все TS' "$tmp/ts-page.html" >/dev/null
+echo "TAILSCALE DUAL PING UI PASS"
 
 echo 'LOCALHOST SMOKE PASS (no root, no VPN tunnels, no external access)'

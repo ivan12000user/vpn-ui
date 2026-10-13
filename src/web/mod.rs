@@ -1,6 +1,6 @@
 use crate::{
     geoip::{GeoIpService, enrich_status},
-    tailscale,
+    tailscale, tailscale_ping,
     vpn::{
         amneziawg,
         common::{InterfaceStatus, PeerStatus, PingResult, ProviderConfig, now_epoch, ping_ip},
@@ -70,6 +70,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tailscale", get(tailscale_page))
         .route("/api/tailscale/status", get(tailscale_api))
         .route("/api/tailscale/ping", post(tailscale_ping))
+        .route("/api/tailscale/overlay-ping", post(tailscale_overlay_ping))
         .route("/api/tailscale/shares", get(tailscale_shares_api))
         .route("/settings", get(settings_page))
         .route("/api/admin/auth", get(admin_auth))
@@ -467,6 +468,14 @@ async fn tailscale_ping(
     )
 }
 
+async fn tailscale_overlay_ping(Json(request): Json<TailscalePingRequest>) -> impl IntoResponse {
+    let status = tailscale::status().await;
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(tailscale_ping::ping(&request.ip, &status).await),
+    )
+}
+
 async fn tailscale_api() -> Json<tailscale::TailStatus> {
     Json(tailscale::status().await)
 }
@@ -526,7 +535,8 @@ fn tailscale_rows(status: &tailscale::TailStatus) -> String {
                 <td data-label="Exit-node">{exit}</td>
                 <td data-label="Relay">{relay}</td>
                 <td data-label="Владелец">{owner}</td>
-                <td class="ping-cell" data-label="Ping"><span class="ping-result">—</span><button class="button small ts-ping-button" type="button"{ping_disabled}>Ping</button></td>
+                <td class="ping-cell" data-label="Tailscale ping"><span class="ping-result">—</span><button class="button small ts-overlay-button" type="button"{ping_disabled}>TS Ping</button></td>
+                <td class="ping-cell" data-label="ICMP"><span class="ping-result">—</span><button class="button small ts-ping-button" type="button"{ping_disabled}>ICMP</button></td>
                </tr>"#,
             name = escape_html(&peer.hostname),
             ip = escape_html(&peer.ip),
@@ -573,7 +583,7 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
           <div><h1>Tailscale</h1><p class="lead">Локально видимые участники сети (только просмотр)</p></div>
           <div class="toolbar">
             <button id="ts-refresh" class="button" type="button">↻ Обновить</button>
-            <button id="ts-ping-all" class="button" type="button">Проверить все</button>
+            <button id="ts-ping-all" class="button" type="button">Проверить все TS</button>
             <input id="ts-filter" class="filter-input" type="search" placeholder="Поиск..." autocomplete="off">
             <label class="auto-refresh"><input id="ts-auto" type="checkbox" checked> Автообновление</label>
             <span id="ts-updated" class="muted">—</span>
@@ -590,7 +600,7 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
           <h2>Участники Tailscale</h2>
           <div class="table-wrap tailscale-table">
             <table>
-              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Ping</th></tr></thead>
+              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Tailscale ping</th><th>ICMP</th></tr></thead>
               <tbody id="tailscale-rows">{rows}</tbody>
             </table>
           </div>
@@ -4164,6 +4174,11 @@ const TAILSCALE_SCRIPT: &str = r#"
   const pingResults = new Map();
   const pingPending = new Set();
   let running = false;
+  const pingModes = {
+    overlay: {route: '/api/tailscale/overlay-ping', css: '.ts-overlay-button'},
+    icmp: {route: '/api/tailscale/ping', css: '.ts-ping-button'}
+  };
+  const pingKey = (mode, ip) => mode + ':' + ip;
 
   const val = value => value || '—';
   function cell(row, label, value, css) {
@@ -4173,43 +4188,47 @@ const TAILSCALE_SCRIPT: &str = r#"
     td.textContent = value;
     row.appendChild(td);
   }
-  function applyPing(row) {
+  function applyPing(row, mode) {
     const ip = row.dataset.tsIp || '';
-    const result = row.querySelector('.ping-result');
-    const button = row.querySelector('.ts-ping-button');
+    const key = pingKey(mode, ip);
+    const config = pingModes[mode];
+    const button = row.querySelector(config.css);
+    const result = button?.parentElement.querySelector('.ping-result');
     if (!result || !button) return;
-    const pending = pingPending.has(ip);
-    const saved = pingResults.get(ip);
+    const pending = pingPending.has(key);
+    const saved = pingResults.get(key);
     result.textContent = pending ? '...' : (saved ? saved.text : '—');
     result.classList.toggle('ok', !pending && saved?.ok === true);
     result.classList.toggle('error', !pending && saved?.ok === false);
     button.disabled = !ip || pending;
   }
-  function pingCell(row) {
+  function pingCell(row, mode) {
     const td = document.createElement('td');
     td.className = 'ping-cell';
-    td.dataset.label = 'Ping';
+    td.dataset.label = mode === 'overlay' ? 'Tailscale ping' : 'ICMP';
     const result = document.createElement('span');
     result.className = 'ping-result';
     const button = document.createElement('button');
-    button.className = 'button small ts-ping-button';
+    button.className = 'button small ' + pingModes[mode].css.slice(1);
     button.type = 'button';
-    button.textContent = 'Ping';
+    button.textContent = mode === 'overlay' ? 'TS Ping' : 'ICMP';
     td.append(result, button);
     row.appendChild(td);
-    applyPing(row);
+    applyPing(row, mode);
   }
-  function refreshPingRow(ip) {
+  function refreshPingRow(ip, mode) {
     for (const row of tbody.rows) {
-      if (row.dataset.tsIp === ip) applyPing(row);
+      if (row.dataset.tsIp === ip) applyPing(row, mode);
     }
   }
-  async function pingPeer(ip) {
-    if (!ip || pingPending.has(ip)) return;
-    pingPending.add(ip);
-    refreshPingRow(ip);
+  async function pingPeer(ip, mode) {
+    if (!ip || !pingModes[mode]) return;
+    const key = pingKey(mode, ip);
+    if (pingPending.has(key)) return;
+    pingPending.add(key);
+    refreshPingRow(ip, mode);
     try {
-      const response = await fetch('/api/tailscale/ping', {
+      const response = await fetch(pingModes[mode].route, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         cache: 'no-store',
@@ -4218,15 +4237,19 @@ const TAILSCALE_SCRIPT: &str = r#"
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const result = await response.json();
       const ok = result.ok === true && Number.isFinite(result.avg_ms);
-      pingResults.set(ip, {
+      const route = mode === 'overlay' && ok
+        ? ' · ' + (result.path || 'Tailscale') +
+          (result.relay ? ' ' + result.relay : '')
+        : '';
+      pingResults.set(key, {
         ok,
-        text: ok ? result.avg_ms.toFixed(1) + ' ms' : (result.error || 'timeout')
+        text: ok ? result.avg_ms.toFixed(1) + ' ms' + route : (result.error || 'timeout')
       });
     } catch (_) {
-      pingResults.set(ip, {ok:false, text:'ошибка'});
+      pingResults.set(key, {ok:false, text:'ошибка'});
     } finally {
-      pingPending.delete(ip);
-      refreshPingRow(ip);
+      pingPending.delete(key);
+      refreshPingRow(ip, mode);
     }
   }
   function render(data) {
@@ -4242,7 +4265,8 @@ const TAILSCALE_SCRIPT: &str = r#"
       cell(tr, 'Exit-node', peer.exit_node_option ? 'Да' : '—');
       cell(tr, 'Relay', val(peer.relay));
       cell(tr, 'Владелец', val(peer.owner));
-      pingCell(tr);
+      pingCell(tr, 'overlay');
+      pingCell(tr, 'icmp');
       tbody.appendChild(tr);
     }
     document.getElementById('ts-self').textContent = val(data.self_hostname);
@@ -4279,10 +4303,11 @@ const TAILSCALE_SCRIPT: &str = r#"
     }
   }
   tbody.addEventListener('click', event => {
-    const button = event.target.closest('.ts-ping-button');
+    const button = event.target.closest('.ts-overlay-button, .ts-ping-button');
     if (button && tbody.contains(button)) {
       const row = button.closest('tr[data-ts-ip]');
-      if (row) pingPeer(row.dataset.tsIp);
+      const mode = button.classList.contains('ts-overlay-button') ? 'overlay' : 'icmp';
+      if (row) pingPeer(row.dataset.tsIp, mode);
     }
   });
   pingAll?.addEventListener('click', async () => {
@@ -4292,11 +4317,11 @@ const TAILSCALE_SCRIPT: &str = r#"
     try {
       for (let i = 0; i < ips.length; i += 4) {
         pingAll.textContent = 'Проверка ' + i + '/' + ips.length;
-        await Promise.all(ips.slice(i, i + 4).map(pingPeer));
+        await Promise.all(ips.slice(i, i + 4).map(ip => pingPeer(ip, 'overlay')));
       }
     } finally {
       pingAll.disabled = false;
-      pingAll.textContent = 'Проверить все';
+      pingAll.textContent = 'Проверить все TS';
     }
   });
   for (const row of tbody.rows) applyPing(row);
