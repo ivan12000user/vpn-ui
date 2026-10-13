@@ -4423,7 +4423,10 @@ mod empty_peer_table_tests {
         assert!(page.contains("id=\"ts-ping-all\""));
         assert!(page.contains("data-ts-ip=\"100.92.11.114\""));
         assert!(page.contains("ts-ping-button"));
-        assert!(page.contains("<th>Ping</th>"));
+        assert!(page.contains("ts-overlay-button"));
+        assert!(page.contains("<th>ICMP</th>"));
+        assert!(page.contains("<th>Tailscale ping</th>"));
+        assert!(TAILSCALE_SCRIPT.contains("/api/tailscale/overlay-ping"));
         assert!(TAILSCALE_SCRIPT.contains("/api/tailscale/ping"));
     }
 

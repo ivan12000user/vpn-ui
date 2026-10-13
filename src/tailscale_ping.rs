@@ -1,6 +1,6 @@
 //! Tailscale control-plane ping, independent of host ICMP.
 //! Executes only a fixed read-only helper, with a known, live Tailscale peer.
-use crate::{tailscale, vpn::common::PingResult};
+use crate::tailscale;
 use serde::Serialize;
 use std::{net::Ipv4Addr, process::Stdio, sync::OnceLock, time::Duration};
 use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore};
@@ -57,7 +57,12 @@ fn parse_pong(line: &str) -> Option<(f64, String, String)> {
     let (_, via) = first.rsplit_once(" via ")?;
     if via.starts_with("DERP(") && via.ends_with(')') {
         let region = &via[5..via.len() - 1];
-        if region.is_empty() || region.len() > 32 || !region.chars().all(|x| x.is_ascii_alphanumeric() || x == '-') {
+        if region.is_empty()
+            || region.len() > 32
+            || !region
+                .chars()
+                .all(|x| x.is_ascii_alphanumeric() || x == '-')
+        {
             return None;
         }
         return Some((value, "DERP".to_string(), region.to_string()));
@@ -157,22 +162,33 @@ mod tests {
     fn only_known_overlay_ip_is_allowed() {
         let status = test_status();
         assert!(known_peer(&status, "100.125.53.1"));
-        for bad in ["127.0.0.1", "8.8.8.8", "100.125.53.2", "100.125.53.1;rm", "::1", "100.128.0.1"] {
+        for bad in [
+            "127.0.0.1",
+            "8.8.8.8",
+            "100.125.53.2",
+            "100.125.53.1;rm",
+            "::1",
+            "100.128.0.1",
+        ] {
             assert!(!known_peer(&status, bad), "{bad}");
         }
     }
 
     #[test]
     fn parses_derp_and_direct_ping_examples() {
-        let derp = parse_output("100.125.53.1",
-            "pong from garage-pc (100.125.53.1) via DERP(ams) in 148ms\npong from garage-pc (100.125.53.1) via DERP(ams) in 217ms\npong from garage-pc (100.125.53.1) via DERP(ams) in 150ms\ndirect connection not established\n");
+        let derp = parse_output(
+            "100.125.53.1",
+            "pong from garage-pc (100.125.53.1) via DERP(ams) in 148ms\npong from garage-pc (100.125.53.1) via DERP(ams) in 217ms\npong from garage-pc (100.125.53.1) via DERP(ams) in 150ms\ndirect connection not established\n",
+        );
         assert!(derp.ok);
         assert_eq!(derp.received, 3);
         assert_eq!(derp.path, "DERP");
         assert_eq!(derp.relay, "ams");
         assert!((derp.avg_ms.unwrap() - 171.6666).abs() < 0.01);
-        let direct = parse_output("100.125.53.1",
-            "pong from garage-pc (100.125.53.1) via 203.0.113.5:41641 in 5.3ms\n");
+        let direct = parse_output(
+            "100.125.53.1",
+            "pong from garage-pc (100.125.53.1) via 203.0.113.5:41641 in 5.3ms\n",
+        );
         assert_eq!(direct.path, "DIRECT");
         assert!((direct.avg_ms.unwrap() - 5.3).abs() < 0.01);
     }
