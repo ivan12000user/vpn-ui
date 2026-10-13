@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, net::Ipv4Addr};
 use tokio::process::Command;
 
 #[derive(Clone)]
@@ -50,6 +50,11 @@ struct PingRequest {
     public_key: String,
 }
 
+#[derive(Deserialize)]
+struct TailscalePingRequest {
+    ip: String,
+}
+
 #[derive(Default)]
 struct SettingsResult {
     values: HashMap<String, String>,
@@ -64,6 +69,7 @@ pub fn router(state: AppState) -> Router {
         .route("/amneziawg31", get(amneziawg31_page))
         .route("/tailscale", get(tailscale_page))
         .route("/api/tailscale/status", get(tailscale_api))
+        .route("/api/tailscale/ping", post(tailscale_ping))
         .route("/api/tailscale/shares", get(tailscale_shares_api))
         .route("/settings", get(settings_page))
         .route("/api/admin/auth", get(admin_auth))
@@ -416,6 +422,51 @@ async fn ping_known_peer(
     ping_ip(ping_command, ip).await
 }
 
+fn tailscale_ip_is_known(status: &tailscale::TailStatus, ip: &str) -> bool {
+    let Ok(addr) = ip.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    let octets = addr.octets();
+    // Tailscale IPv4 CGNAT range 100.64.0.0/10. Reject addresses
+    // outside the overlay even if malformed status data contains them.
+    if octets[0] != 100 || !(64..=127).contains(&octets[1]) {
+        return false;
+    }
+    status.peers.iter().any(|peer| peer.ip == ip)
+}
+
+async fn tailscale_ping(
+    State(state): State<AppState>,
+    Json(request): Json<TailscalePingRequest>,
+) -> impl IntoResponse {
+    let status = tailscale::status().await;
+    let result = if let Some(error) = status.error {
+        PingResult {
+            ok: false,
+            ip: String::new(),
+            avg_ms: None,
+            received: 0,
+            error: Some(format!("Tailscale status unavailable: {error}")),
+        }
+    } else if !tailscale_ip_is_known(&status, &request.ip) {
+        PingResult {
+            ok: false,
+            ip: String::new(),
+            avg_ms: None,
+            received: 0,
+            error: Some("Tailscale peer not found".to_string()),
+        }
+    } else {
+        // Reuse exactly the existing WG/AWG ICMP measurement helper.
+        // Never call tailscale up/set, alter routes, or accept arbitrary IPs.
+        ping_ip(&state.ping_command, &request.ip).await
+    };
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(result),
+    )
+}
+
 async fn tailscale_api() -> Json<tailscale::TailStatus> {
     Json(tailscale::status().await)
 }
@@ -465,8 +516,9 @@ fn tailscale_rows(status: &tailscale::TailStatus) -> String {
             "Нет обмена"
         };
         let exit = if peer.exit_node_option { "Да" } else { "—" };
+        let ping_disabled = if peer.ip.is_empty() { " disabled" } else { "" };
         rows.push_str(&format!(
-            r#"<tr class="status-{state_class}">
+            r#"<tr class="status-{state_class}" data-ts-ip="{ping_ip}">
                 <td class="peer-name-cell" data-label="Имя"><strong class="peer-name">{name}</strong></td>
                 <td class="mono" data-label="Tailscale IP">{ip}</td>
                 <td data-label="Статус">{state}</td>
@@ -474,11 +526,13 @@ fn tailscale_rows(status: &tailscale::TailStatus) -> String {
                 <td data-label="Exit-node">{exit}</td>
                 <td data-label="Relay">{relay}</td>
                 <td data-label="Владелец">{owner}</td>
+                <td class="ping-cell" data-label="Ping"><span class="ping-result">—</span><button class="button small ts-ping-button" type="button"{ping_disabled}>Ping</button></td>
                </tr>"#,
             name = escape_html(&peer.hostname),
             ip = escape_html(&peer.ip),
             relay = escape_html(if peer.relay.is_empty() { "—" } else { &peer.relay }),
             owner = escape_html(if peer.owner.is_empty() { "—" } else { &peer.owner }),
+            ping_ip = escape_html(&peer.ip),
         ));
     }
     rows
@@ -519,6 +573,7 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
           <div><h1>Tailscale</h1><p class="lead">Локально видимые участники сети (только просмотр)</p></div>
           <div class="toolbar">
             <button id="ts-refresh" class="button" type="button">↻ Обновить</button>
+            <button id="ts-ping-all" class="button" type="button">Проверить все</button>
             <input id="ts-filter" class="filter-input" type="search" placeholder="Поиск..." autocomplete="off">
             <label class="auto-refresh"><input id="ts-auto" type="checkbox" checked> Автообновление</label>
             <span id="ts-updated" class="muted">—</span>
@@ -535,7 +590,7 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
           <h2>Участники Tailscale</h2>
           <div class="table-wrap tailscale-table">
             <table>
-              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th></tr></thead>
+              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Ping</th></tr></thead>
               <tbody id="tailscale-rows">{rows}</tbody>
             </table>
           </div>
@@ -4101,10 +4156,13 @@ const TAILSCALE_SCRIPT: &str = r#"
   const tbody = document.getElementById('tailscale-rows');
   if (!tbody) return;
   const refresh = document.getElementById('ts-refresh');
+  const pingAll = document.getElementById('ts-ping-all');
   const auto = document.getElementById('ts-auto');
   const updated = document.getElementById('ts-updated');
   const filter = document.getElementById('ts-filter');
   const errors = document.getElementById('ts-error');
+  const pingResults = new Map();
+  const pingPending = new Set();
   let running = false;
 
   const val = value => value || '—';
@@ -4115,11 +4173,68 @@ const TAILSCALE_SCRIPT: &str = r#"
     td.textContent = value;
     row.appendChild(td);
   }
+  function applyPing(row) {
+    const ip = row.dataset.tsIp || '';
+    const result = row.querySelector('.ping-result');
+    const button = row.querySelector('.ts-ping-button');
+    if (!result || !button) return;
+    const pending = pingPending.has(ip);
+    const saved = pingResults.get(ip);
+    result.textContent = pending ? '...' : (saved ? saved.text : '—');
+    result.classList.toggle('ok', !pending && saved?.ok === true);
+    result.classList.toggle('error', !pending && saved?.ok === false);
+    button.disabled = !ip || pending;
+  }
+  function pingCell(row) {
+    const td = document.createElement('td');
+    td.className = 'ping-cell';
+    td.dataset.label = 'Ping';
+    const result = document.createElement('span');
+    result.className = 'ping-result';
+    const button = document.createElement('button');
+    button.className = 'button small ts-ping-button';
+    button.type = 'button';
+    button.textContent = 'Ping';
+    td.append(result, button);
+    row.appendChild(td);
+    applyPing(row);
+  }
+  function refreshPingRow(ip) {
+    for (const row of tbody.rows) {
+      if (row.dataset.tsIp === ip) applyPing(row);
+    }
+  }
+  async function pingPeer(ip) {
+    if (!ip || pingPending.has(ip)) return;
+    pingPending.add(ip);
+    refreshPingRow(ip);
+    try {
+      const response = await fetch('/api/tailscale/ping', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        cache: 'no-store',
+        body: JSON.stringify({ip})
+      });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const result = await response.json();
+      const ok = result.ok === true && Number.isFinite(result.avg_ms);
+      pingResults.set(ip, {
+        ok,
+        text: ok ? result.avg_ms.toFixed(1) + ' ms' : (result.error || 'timeout')
+      });
+    } catch (_) {
+      pingResults.set(ip, {ok:false, text:'ошибка'});
+    } finally {
+      pingPending.delete(ip);
+      refreshPingRow(ip);
+    }
+  }
   function render(data) {
     tbody.replaceChildren();
     for (const peer of (data.peers || [])) {
       const tr = document.createElement('tr');
       tr.className = peer.online ? 'status-ok' : 'status-offline';
+      tr.dataset.tsIp = peer.ip || '';
       cell(tr, 'Имя', val(peer.hostname), 'peer-name-cell');
       cell(tr, 'Tailscale IP', val(peer.ip), 'mono');
       cell(tr, 'Статус', peer.online ? 'ONLINE' : 'OFFLINE');
@@ -4127,6 +4242,7 @@ const TAILSCALE_SCRIPT: &str = r#"
       cell(tr, 'Exit-node', peer.exit_node_option ? 'Да' : '—');
       cell(tr, 'Relay', val(peer.relay));
       cell(tr, 'Владелец', val(peer.owner));
+      pingCell(tr);
       tbody.appendChild(tr);
     }
     document.getElementById('ts-self').textContent = val(data.self_hostname);
@@ -4149,9 +4265,9 @@ const TAILSCALE_SCRIPT: &str = r#"
     running = true;
     refresh.disabled = true;
     try {
-      const result = await fetch('/api/tailscale/status', {cache:'no-store'});
-      if (!result.ok) throw new Error('HTTP ' + result.status);
-      render(await result.json());
+      const response = await fetch('/api/tailscale/status', {cache:'no-store'});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      render(await response.json());
       updated.textContent = 'Обновлено ' + new Date().toLocaleTimeString();
     } catch (e) {
       updated.textContent = 'Нет связи';
@@ -4162,6 +4278,28 @@ const TAILSCALE_SCRIPT: &str = r#"
       running = false;
     }
   }
+  tbody.addEventListener('click', event => {
+    const button = event.target.closest('.ts-ping-button');
+    if (button && tbody.contains(button)) {
+      const row = button.closest('tr[data-ts-ip]');
+      if (row) pingPeer(row.dataset.tsIp);
+    }
+  });
+  pingAll?.addEventListener('click', async () => {
+    const ips = [...new Set(Array.from(tbody.rows)
+      .map(row => row.dataset.tsIp).filter(Boolean))];
+    pingAll.disabled = true;
+    try {
+      for (let i = 0; i < ips.length; i += 4) {
+        pingAll.textContent = 'Проверка ' + i + '/' + ips.length;
+        await Promise.all(ips.slice(i, i + 4).map(pingPeer));
+      }
+    } finally {
+      pingAll.disabled = false;
+      pingAll.textContent = 'Проверить все';
+    }
+  });
+  for (const row of tbody.rows) applyPing(row);
   refresh.addEventListener('click', poll);
   filter.addEventListener('input', filterRows);
   setInterval(() => { if (auto.checked && !document.hidden) poll(); }, 15000);
@@ -4226,6 +4364,43 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
 #[cfg(test)]
 mod empty_peer_table_tests {
     use super::*;
+
+    #[test]
+    fn tailscale_ping_rejects_non_overlay_and_unknown_targets() {
+        let status = tailscale::TailStatus {
+            peers: vec![tailscale::TailPeer {
+                hostname: "node".into(),
+                ip: "100.92.11.114".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(tailscale_ip_is_known(&status, "100.92.11.114"));
+        assert!(!tailscale_ip_is_known(&status, "100.92.11.115"));
+        assert!(!tailscale_ip_is_known(&status, "100.128.0.1"));
+        assert!(!tailscale_ip_is_known(&status, "192.168.1.1"));
+        assert!(!tailscale_ip_is_known(&status, "127.0.0.1"));
+        assert!(!tailscale_ip_is_known(&status, "-c"));
+        assert!(!tailscale_ip_is_known(&status, "100.92.11.114;id"));
+    }
+
+    #[test]
+    fn tailscale_page_has_ping_controls_on_initial_render() {
+        let status = tailscale::TailStatus {
+            peers: vec![tailscale::TailPeer {
+                hostname: "opione".into(),
+                ip: "100.92.11.114".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let page = tailscale_page_body(&status);
+        assert!(page.contains("id=\"ts-ping-all\""));
+        assert!(page.contains("data-ts-ip=\"100.92.11.114\""));
+        assert!(page.contains("ts-ping-button"));
+        assert!(page.contains("<th>Ping</th>"));
+        assert!(TAILSCALE_SCRIPT.contains("/api/tailscale/ping"));
+    }
 
     #[test]
     fn initial_empty_page_keeps_hidden_table_for_first_peer() {
