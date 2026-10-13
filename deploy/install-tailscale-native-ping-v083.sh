@@ -78,7 +78,7 @@ visudo -cf "$SUDOERS"
 # An intentionally rejected loopback address returns helper exit code 64;
 # sudo permission errors return a different status.
 set +e
-printf '127.0.0.1\\n' | sudo -n -u vpn-ui "$WRAPPER" >/dev/null 2>&1
+printf '%s\n' '127.0.0.1' | sudo -n -u vpn-ui "$WRAPPER" >/dev/null 2>&1
 permission_rc=$?
 set -e
 if [[ "$permission_rc" != 64 ]]; then
