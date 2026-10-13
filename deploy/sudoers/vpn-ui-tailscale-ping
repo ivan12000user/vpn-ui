@@ -1,0 +1,2 @@
+# Fixed root-owned helper with no arguments; validates stdin and live Tailscale netmap.
+vpn-ui ALL=(root) NOPASSWD: /usr/local/libexec/vpn-ui-tailscale-ping ""

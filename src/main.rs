@@ -5,6 +5,7 @@ mod icon;
 mod settings_manage;
 mod tailscale;
 mod tailscale_admin;
+mod tailscale_ping;
 mod vpn;
 mod web;
 

@@ -1,0 +1,53 @@
+#!/usr/bin/python3
+"""Restricted, no-argument Tailscale ping for the vpn-ui service via sudo."""
+import ipaddress
+import json
+import subprocess
+import sys
+
+TS = "/usr/bin/tailscale"
+NET = ipaddress.ip_network("100.64.0.0/10")
+
+
+def deny():
+    print("Tailscale ping denied", file=sys.stderr)
+    sys.exit(64)
+
+
+if len(sys.argv) != 1:
+    deny()
+raw = sys.stdin.buffer.readline(65)
+if len(raw) > 40:
+    deny()
+try:
+    ip = ipaddress.IPv4Address(raw.decode("ascii").strip())
+except (UnicodeError, ipaddress.AddressValueError):
+    deny()
+if ip not in NET:
+    deny()
+
+try:
+    listing = subprocess.run(
+        [TS, "status", "--json"], capture_output=True, check=True,
+        timeout=8, env={"PATH": "/usr/bin:/bin"},
+    )
+    peers = json.loads(listing.stdout).get("Peer") or {}
+    if not isinstance(peers, dict):
+        deny()
+    allowed = any(
+        str(ip) in (peer.get("TailscaleIPs") or [])
+        for peer in peers.values() if isinstance(peer, dict)
+    )
+    if not allowed:
+        deny()
+    result = subprocess.run(
+        [TS, "ping", "-c", "3", str(ip)],
+        capture_output=True, timeout=16,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+except (OSError, ValueError, subprocess.SubprocessError):
+    sys.exit(1)
+
+# Only CLI reply lines; do not expose subprocess stderr or raw status data.
+sys.stdout.buffer.write(result.stdout[:8192])
+sys.exit(result.returncode)
