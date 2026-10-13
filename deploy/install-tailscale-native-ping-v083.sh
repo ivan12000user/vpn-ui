@@ -74,8 +74,18 @@ install -m 0755 "$ROOT/vpn-ui-tailscale-ping.helper" "$HELPER"
 install -m 0755 "$ROOT/vpn-ui-tailscale-ping.wrapper" "$WRAPPER"
 install -m 0440 "$ROOT/vpn-ui-tailscale-ping.sudoers" "$SUDOERS"
 visudo -cf "$SUDOERS"
-# Verify privilege boundary even if a particular remote peer does not respond.
-sudo -l -U vpn-ui >/dev/null
+# Verify vpn-ui can execute ONLY the fixed no-argument helper.
+# An intentionally rejected loopback address returns helper exit code 64;
+# sudo permission errors return a different status.
+set +e
+printf '127.0.0.1\\n' | sudo -n -u vpn-ui "$WRAPPER" >/dev/null 2>&1
+permission_rc=$?
+set -e
+if [[ "$permission_rc" != 64 ]]; then
+  echo "Restricted helper privilege test failed (rc=$permission_rc)" >&2
+  exit 1
+fi
+echo 'Fixed-helper sudo permission: PASS'
 
 echo '===== UPGRADE BINARY ====='
 install -m 0755 "$ROOT/vpn-ui.upload" "${TARGET}.v083"
