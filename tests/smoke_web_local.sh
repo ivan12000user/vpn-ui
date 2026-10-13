@@ -17,9 +17,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Fake local Tailscale netmap and ping binary: CI never probes a live network.
+cat > "$tmp/tailscale-ro" <<'EOF'
+#!/bin/sh
+cat <<'JSON'
+{"BackendState":"Running","Self":{"HostName":"test-server","TailscaleIPs":["100.80.198.69"]},"Peer":{"test-peer":{"HostName":"lab-peer","Online":true,"TailscaleIPs":["100.92.11.114"]}}}
+JSON
+EOF
+chmod 0755 "$tmp/tailscale-ro"
+
 # Fixed nonprivileged localhost port on isolated GitHub runner.
 base="http://127.0.0.1:18790"
 env \
+  VPN_UI_TAILSCALE_COMMAND="$tmp/tailscale-ro" \
+  VPN_UI_PING_COMMAND=/usr/bin/false \
   VPN_UI_LISTEN=127.0.0.1:18790 \
   VPN_UI_GEOIP_CACHE="$tmp/geoip.json" \
   VPN_UI_WG_COMMAND=/usr/bin/false \
@@ -90,6 +101,36 @@ assert data["configured"] is False, data
 assert data["users"] == [], data
 assert data["invites"] == [], data
 print("TAILSCALE INVITES DISABLED-BY-DEFAULT PASS")
+PY
+
+# Ping is read-only and MUST be restricted to the current Tailscale netmap.
+curl --silent --show-error --fail --max-time 12 \
+  -H 'Content-Type: application/json' \
+  --data '{"ip":"100.92.11.114"}' \
+  "$base/api/tailscale/ping" -o "$tmp/ts-ping-known.json"
+curl --silent --show-error --fail --max-time 12 \
+  -H 'Content-Type: application/json' \
+  --data '{"ip":"100.92.11.115"}' \
+  "$base/api/tailscale/ping" -o "$tmp/ts-ping-unknown.json"
+curl --silent --show-error --fail --max-time 12 \
+  -H 'Content-Type: application/json' \
+  --data '{"ip":"127.0.0.1"}' \
+  "$base/api/tailscale/ping" -o "$tmp/ts-ping-loopback.json"
+python3 - "$tmp/ts-ping-known.json" "$tmp/ts-ping-unknown.json" "$tmp/ts-ping-loopback.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+known, unknown, loopback = [json.loads(Path(p).read_text()) for p in sys.argv[1:]]
+# Our deliberately non-functional ICMP command is reached for known peers.
+assert known["ip"] == "100.92.11.114", known
+assert known["ok"] is False and known["error"] == "timeout", known
+# Unrecognized peers and arbitrary IPs never reach the ping command.
+for rejected in (unknown, loopback):
+    assert rejected["ok"] is False, rejected
+    assert rejected["ip"] == "", rejected
+    assert rejected["error"] == "Tailscale peer not found", rejected
+print("TAILSCALE PING WHITELIST PASS")
 PY
 
 echo 'LOCALHOST SMOKE PASS (no root, no VPN tunnels, no external access)'
