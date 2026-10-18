@@ -2504,6 +2504,18 @@ body.modal-open {
   }
 }
 
+/* History selection layout, also on laptops/desktops. */
+.history-filters {
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(220px, 360px);
+  gap: 12px;
+  margin: 12px 0;
+}
+.history-field { min-width: 0; }
+.history-field label { display: block; margin-bottom: 5px; }
+.history-field .filter-input { width: 100%; }
+.history-graph { width: 100%; min-width: 0; overflow: hidden; }
+
 /* Pixel/Android phones: one-row header, native keyboard-accessible
    details menu (works without JavaScript) and comfortable touch targets. */
 .mobile-nav { display: none; }
@@ -4562,6 +4574,24 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
 #[cfg(test)]
 mod empty_peer_table_tests {
     use super::*;
+
+    #[test]
+    fn mobile_menu_is_keyboard_accessible_and_desktop_layout_is_preserved() {
+        let page = layout("История", "<p>probe</p>");
+        assert!(page.contains("<details class=\"mobile-nav\">"));
+        assert!(page.contains("<summary aria-label=\"Меню разделов VPN UI\">"));
+        assert!(page.contains("<div class=\"nav-links-desktop\">"));
+        assert!(page.contains("<div class=\"mobile-nav-links\">"));
+        assert!(page.contains("<span class=\"mobile-current-page\">История</span>"));
+        assert!(page.contains("<main id=\"main-content\">"));
+        assert!(STYLE.contains("@media (max-width: 900px)"));
+        assert!(STYLE.contains(".mobile-nav > summary:focus-visible"));
+        assert!(STYLE.contains("min-height: 46px"));
+        for link in ["/wireguard", "/amneziawg", "/amneziawg31",
+                     "/tailscale", "/history", "/settings"] {
+            assert_eq!(page.matches(&format!("href=\"{link}\"")).count(), 2);
+        }
+    }
 
     #[test]
     fn tailscale_ping_rejects_non_overlay_and_unknown_targets() {
