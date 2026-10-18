@@ -4587,8 +4587,14 @@ mod empty_peer_table_tests {
         assert!(STYLE.contains("@media (max-width: 900px)"));
         assert!(STYLE.contains(".mobile-nav > summary:focus-visible"));
         assert!(STYLE.contains("min-height: 46px"));
-        for link in ["/wireguard", "/amneziawg", "/amneziawg31",
-                     "/tailscale", "/history", "/settings"] {
+        for link in [
+            "/wireguard",
+            "/amneziawg",
+            "/amneziawg31",
+            "/tailscale",
+            "/history",
+            "/settings",
+        ] {
             assert_eq!(page.matches(&format!("href=\"{link}\"")).count(), 2);
         }
     }
