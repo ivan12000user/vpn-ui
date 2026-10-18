@@ -4342,7 +4342,11 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
         ""
     };
     let tailscale_active = if title == "Tailscale" { " active" } else { "" };
-    let history_active = if title == "История" { " active" } else { "" };
+    let history_active = if title == "История" {
+        " active"
+    } else {
+        ""
+    };
     let settings_active = if title == "Настройки" {
         " active"
     } else {
