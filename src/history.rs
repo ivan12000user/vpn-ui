@@ -81,9 +81,9 @@ async fn page() -> Html<String> {
   <p class="muted" id="hist-msg" role="status">Загрузка истории...</p>
   <div class="summary" id="hist-summary" hidden>
     <div><span>Устройство</span><strong id="hist-selected">—</strong></div>
-    <div><span>Измерений Ping</span><strong id="hist-probes">—</strong></div>
-    <div><span>Успешных ответов</span><strong id="hist-uptime">—</strong></div>
-    <div><span>Последний Ping</span><strong id="hist-last">—</strong></div>
+    <div><span>Ping / записей</span><strong id="hist-probes">—</strong></div>
+    <div><span>Успешных Ping</span><strong id="hist-uptime">—</strong></div>
+    <div><span>Последняя запись</span><strong id="hist-last">—</strong></div>
   </div>
   <div class="toolbar" style="margin:12px 0">
     <label for="hist-provider">Протокол</label>
@@ -181,21 +181,32 @@ const SCRIPT: &str = r#"
     }
     let last = null;
     let path = '';
+    const markers = [];
     for (const p of points) {
       if (p.ping_ok === 1 && Number.isFinite(p.rtt_ms)) {
         const px = x(p.ts), py = y(p.rtt_ms);
-        path += (last && p.ts-last.ts <= 660 ? 'L':'M') + px.toFixed(1) +
-          ',' + py.toFixed(1) + ' ';
+        // Gaps without an actual probe are UNKNOWN, not failed pings.
+        // Connect only nearby successes; never bridge an explicit failure.
+        path += (last && p.ts > last.ts && p.ts - last.ts <= 1800 ? 'L' : 'M') +
+          px.toFixed(1) + ',' + py.toFixed(1) + ' ';
+        const dot = node('circle', {cx:px, cy:py, r:4.5,
+          fill:'#16a34a', stroke:'currentColor', 'stroke-width':1.1});
+        dot.appendChild(node('title',{},fmt(p.ts) + ' · ' + p.rtt_ms.toFixed(1) + ' мс'));
+        markers.push(dot);
         last = p;
-      } else {
-        if (p.ping_ok === 0) {
-          chart.appendChild(node('circle',{cx:x(p.ts),cy:base-3,r:3.2,fill:'#e05656'}));
-        }
+      } else if (p.ping_ok === 0) {
+        // Explicit negative result breaks the green line.
+        const dot = node('circle', {cx:x(p.ts),cy:base-4,r:4.5,fill:'#e05656'});
+        dot.appendChild(node('title',{},fmt(p.ts) + ' · нет ответа'));
+        markers.push(dot);
         last = null;
       }
+      // ping_ok === null: no check performed; do NOT mark it as failure.
     }
     chart.appendChild(node('path',{d:path,fill:'none',stroke:'#16a34a',
       'stroke-width':2.5,'stroke-linejoin':'round','stroke-linecap':'round'}));
+    // Always render measured points, even if only ONE success was recorded.
+    for (const dot of markers) chart.appendChild(dot);
     graph.appendChild(chart);
   }
 
@@ -230,7 +241,9 @@ const SCRIPT: &str = r#"
     $('hist-selected').textContent = label(chosen);
     $('hist-probes').textContent = String(chosen.probes) + ' / ' + String(chosen.samples);
     $('hist-uptime').textContent = chosen.probes
-      ? (100 * chosen.replies / chosen.probes).toFixed(1) + '%'
+      ? String(chosen.replies) + '/' + String(chosen.probes) + ' (' +
+        (100 * chosen.replies / chosen.probes).toFixed(1) + '%)' +
+        (chosen.probes < 5 ? ' · мало данных' : '')
       : 'Нет измерений';
     $('hist-last').textContent = fmt(chosen.last_sample);
     const search = new URLSearchParams({
@@ -270,6 +283,9 @@ mod tests {
     fn page_has_history_controls_and_safe_chart() {
         assert!(SCRIPT.contains("/api/history?hours="));
         assert!(SCRIPT.contains("createElementNS"));
+        assert!(SCRIPT.contains("for (const dot of markers) chart.appendChild(dot);"));
+        assert!(SCRIPT.contains("ping_ok === null: no check performed"));
+        assert!(SCRIPT.contains("chosen.replies / chosen.probes"));
         assert!(!SCRIPT.contains(".innerHTML"));
     }
 
