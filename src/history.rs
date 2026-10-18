@@ -223,6 +223,19 @@ const SCRIPT: &str = r#"
       'stroke-width':2.5,'stroke-linejoin':'round','stroke-linecap':'round'}));
     // Always render measured points, even if only ONE success was recorded.
     for (const dot of markers) chart.appendChild(dot);
+    if (good.length === 0) {
+      const failures = points.filter(p => p.ping_ok === 0).length;
+      chart.appendChild(node('text',{
+        x:width/2,y:top+(base-top)*0.42,
+        'text-anchor':'middle',fill:'currentColor',
+        'font-size':compact?15:17
+      },'Нет успешных Ping за период'));
+      chart.appendChild(node('text',{
+        x:width/2,y:top+(base-top)*0.42+25,
+        'text-anchor':'middle',fill:'currentColor',
+        opacity:'.7','font-size':compact?12:14
+      },failures ? ('Без ответа: '+failures+' проверок') : 'Пока нет измерений'));
+    }
     graph.appendChild(chart);
   }
 

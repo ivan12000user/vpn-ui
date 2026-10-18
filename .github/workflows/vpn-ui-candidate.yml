@@ -9,6 +9,7 @@ on:
       - feature/v084-history-monitoring
       - fix/v085-history-single-points
       - feature/v086-pixel-mobile-ui
+      - feature/v087-pixel-compact-peers
   pull_request:
     branches:
       - master
@@ -46,6 +47,9 @@ jobs:
 
       - name: Run Rust tests
         run: cargo +1.98.0 test --locked
+
+      - name: Offline Tailscale initialization regression
+        run: node tests/test_tailscale_startup.cjs
 
       - name: Offline history chart SVG regression
         run: node tests/test_history_chart.cjs
