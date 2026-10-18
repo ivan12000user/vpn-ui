@@ -2504,6 +2504,102 @@ body.modal-open {
   }
 }
 
+
+/* Pixel portrait: compact Tailscale cards. The original table remains unchanged
+   on desktop, and ALL peer fields remain visible on mobile. */
+@media (max-width: 700px) {
+  .tailscale-table tbody { grid-template-columns: 1fr; gap: 10px; }
+  .tailscale-table tbody tr[data-ts-ip] {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+    gap: 0 12px;
+    padding: 10px 12px;
+    border-radius: 11px;
+  }
+  .tailscale-table tbody tr[data-ts-ip] > td {
+    grid-column: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 3px;
+    min-width: 0;
+    padding: 8px 1px;
+    border-bottom: 1px solid rgba(48, 57, 67, .6);
+    font-size: 14px;
+    line-height: 1.28;
+    text-align: left;
+    overflow-wrap: anywhere;
+    word-break: normal;
+  }
+  .tailscale-table tbody tr[data-ts-ip] > td::before {
+    display: block;
+    flex: 0 0 auto;
+    margin: 0 0 2px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.2;
+  }
+  .tailscale-table tbody tr[data-ts-ip] > td.peer-name-cell {
+    grid-column: 1 / -1;
+    display: block;
+    padding: 3px 0 9px;
+    font-size: 18px;
+    line-height: 1.3;
+    font-weight: 750;
+    border-bottom: 1px solid var(--border);
+  }
+  .tailscale-table tbody tr[data-ts-ip] > td.peer-name-cell::before {
+    display: none;
+  }
+  .tailscale-table tbody tr[data-ts-ip] > td.mono {
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+  .tailscale-table tbody tr.status-ok[data-ts-ip] > td:nth-child(3) {
+    color: var(--green);
+    font-weight: 700;
+  }
+  .tailscale-table tbody tr.status-offline[data-ts-ip] > td:nth-child(3) {
+    color: var(--red);
+    font-weight: 700;
+  }
+  .tailscale-table tbody tr[data-ts-ip] > td:nth-child(7) {
+    grid-column: 1 / -1;
+    padding: 8px 1px;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .tailscale-table tbody tr[data-ts-ip] > td.ping-cell {
+    display: flex;
+    grid-column: auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    min-width: 0;
+    padding: 10px 0 2px;
+    border-bottom: 0;
+  }
+  .tailscale-table tbody tr[data-ts-ip] > td.ping-cell::before {
+    margin-bottom: 0;
+  }
+  .tailscale-table tbody tr[data-ts-ip] .ping-result {
+    display: block;
+    min-height: 18px;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .tailscale-table tbody tr[data-ts-ip] .ping-cell .button {
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+    padding: 7px 10px;
+    font-size: 14px;
+  }
+}
+
 /* History selection layout, also on laptops/desktops. */
 .history-filters {
   display: grid;
@@ -4484,7 +4580,12 @@ const TAILSCALE_SCRIPT: &str = r#"
       pingAll.textContent = 'Проверить все TS';
     }
   });
-  for (const row of tbody.rows) applyPing(row);
+  // Initialize each ping mode separately; otherwise applyPing() receives
+  // an undefined mode and aborts the rest of the Tailscale page script.
+  for (const row of tbody.rows) {
+    applyPing(row, 'overlay');
+    applyPing(row, 'icmp');
+  }
   refresh.addEventListener('click', poll);
   filter.addEventListener('input', filterRows);
   setInterval(() => { if (auto.checked && !document.hidden) poll(); }, 15000);
@@ -4574,6 +4675,30 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
 #[cfg(test)]
 mod empty_peer_table_tests {
     use super::*;
+
+    #[test]
+    fn mobile_tailscale_cards_and_initial_ping_modes_are_safe() {
+        let status = tailscale::TailStatus {
+            peers: vec![tailscale::TailPeer {
+                hostname: "pixel-peer".into(),
+                ip: "100.88.88.8".into(),
+                owner: "an.example.account@example.test".into(),
+                online: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let html = tailscale_page_body(&status);
+        assert!(html.contains("data-ts-ip=\"100.88.88.8\""));
+        assert!(html.contains("an.example.account@example.test"));
+        assert!(html.contains("ts-overlay-button"));
+        assert!(html.contains("ts-ping-button"));
+        assert!(STYLE.contains(".tailscale-table tbody tr[data-ts-ip]"));
+        assert!(STYLE.contains("grid-template-columns: repeat(2, minmax(0, 1fr))"));
+        assert!(TAILSCALE_SCRIPT.contains("applyPing(row, 'overlay');"));
+        assert!(TAILSCALE_SCRIPT.contains("applyPing(row, 'icmp');"));
+        assert!(!TAILSCALE_SCRIPT.contains("applyPing(row);"));
+    }
 
     #[test]
     fn mobile_menu_is_keyboard_accessible_and_desktop_layout_is_preserved() {
