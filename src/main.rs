@@ -1,7 +1,7 @@
 mod admin;
 mod geoip;
-mod html_polish;
 mod history;
+mod html_polish;
 mod icon;
 mod settings_manage;
 mod tailscale;
