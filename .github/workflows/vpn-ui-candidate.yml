@@ -7,6 +7,7 @@ on:
       - feature/tailscale-peer-ping
       - feature/tailscale-native-ping-v083
       - feature/v084-history-monitoring
+      - fix/v085-history-single-points
   pull_request:
     branches:
       - master
@@ -44,6 +45,9 @@ jobs:
 
       - name: Run Rust tests
         run: cargo +1.98.0 test --locked
+
+      - name: Offline history chart SVG regression
+        run: node tests/test_history_chart.cjs
 
       - name: Offline SQLite history tests
         run: python3 -m unittest discover -s tests -p 'test_history.py' -v
