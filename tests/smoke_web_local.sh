@@ -170,4 +170,17 @@ grep -F '<th>ICMP</th>' "$tmp/ts-page.html" >/dev/null
 grep -F 'Проверить все TS' "$tmp/ts-page.html" >/dev/null
 echo "TAILSCALE DUAL PING UI PASS"
 
+# No history helper or database on a disposable runner: respond gracefully.
+curl --silent --show-error --fail --max-time 8   "$base/api/history?hours=168" -o "$tmp/history.json"
+python3 - "$tmp/history.json" <<'PY'
+import json,sys
+a=json.load(open(sys.argv[1]))
+assert a["configured"] is False, a
+assert a["points"] == [], a
+print("HISTORY NOT INSTALLED PASS")
+PY
+curl --silent --show-error --fail --max-time 8 "$base/history"   -o "$tmp/history.html"
+grep -F 'id="hist-graph"' "$tmp/history.html" >/dev/null
+echo 'HISTORY PAGE PASS'
+
 echo 'LOCALHOST SMOKE PASS (no root, no VPN tunnels, no external access)'

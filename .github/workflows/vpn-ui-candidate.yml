@@ -6,6 +6,7 @@ on:
       - integration/v080-awg31-tailscale-prep-20261011
       - feature/tailscale-peer-ping
       - feature/tailscale-native-ping-v083
+      - feature/v084-history-monitoring
   pull_request:
     branches:
       - master
@@ -43,6 +44,9 @@ jobs:
 
       - name: Run Rust tests
         run: cargo +1.98.0 test --locked
+
+      - name: Offline SQLite history tests
+        run: python3 -m unittest discover -s tests -p 'test_history.py' -v
 
       - name: Build release executable
         run: cargo +1.98.0 build --release --locked
