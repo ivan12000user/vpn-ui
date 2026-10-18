@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Graph/mobile-only v0.8.7 -> v0.8.7 upgrade. No VPN service restarts.
+# Pixel card-only v0.8.6 -> v0.8.7 upgrade. No VPN service restarts.
 set -Eeuo pipefail
 umask 077
 BIN=/usr/local/bin/vpn-ui
