@@ -8,6 +8,7 @@ on:
       - feature/tailscale-native-ping-v083
       - feature/v084-history-monitoring
       - fix/v085-history-single-points
+      - feature/v086-pixel-mobile-ui
   pull_request:
     branches:
       - master

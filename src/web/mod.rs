@@ -2503,6 +2503,165 @@ body.modal-open {
     white-space: normal;
   }
 }
+
+/* History selection layout, also on laptops/desktops. */
+.history-filters {
+  display: grid;
+  grid-template-columns: minmax(170px, 220px) minmax(220px, 360px);
+  gap: 12px;
+  margin: 12px 0;
+}
+.history-field { min-width: 0; }
+.history-field label { display: block; margin-bottom: 5px; }
+.history-field .filter-input { width: 100%; }
+.history-graph { width: 100%; min-width: 0; overflow: hidden; }
+
+/* Pixel/Android phones: one-row header, native keyboard-accessible
+   details menu (works without JavaScript) and comfortable touch targets. */
+.mobile-nav { display: none; }
+@media (max-width: 900px) {
+  nav {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 56px;
+    padding: 6px max(12px, env(safe-area-inset-right))
+             6px max(12px, env(safe-area-inset-left));
+    background: var(--bg);
+  }
+  .nav-links-desktop { display: none; }
+  .mobile-nav { display: block; position: relative; flex: 0 1 auto; min-width: 0; }
+  .brand {
+    flex: 0 0 auto;
+    margin: 0;
+    font-size: 19px;
+    line-height: 1.25;
+    text-align: left;
+  }
+  .mobile-nav > summary {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-height: 44px;
+    max-width: calc(100vw - 110px);
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 650;
+    cursor: pointer;
+    list-style: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mobile-nav > summary::-webkit-details-marker { display: none; }
+  .mobile-nav > summary::marker { content: ''; }
+  .mobile-nav > summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+  .mobile-current-page {
+    color: var(--accent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: min(35vw, 190px);
+  }
+  .mobile-menu-icon { font-size: 21px; font-weight: 400; line-height: 1; }
+  .mobile-nav[open] > summary {
+    border-color: var(--accent);
+  }
+  .mobile-nav-links {
+    position: absolute;
+    top: calc(100% + 7px);
+    right: 0;
+    z-index: 40;
+    width: min(86vw, 340px);
+    max-height: min(75dvh, 590px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, .55);
+  }
+  .mobile-nav-links a {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    margin: 0 0 3px;
+    padding: 11px 14px;
+    min-height: 46px;
+    font-size: 16px;
+    line-height: 1.3;
+    text-align: left;
+  }
+  .mobile-nav-links a:last-child { margin-bottom: 0; }
+  .mobile-nav-links a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  main { min-width: 0; }
+}
+@media (max-width: 700px) {
+  main { padding: 12px max(12px, env(safe-area-inset-right))
+                   16px max(12px, env(safe-area-inset-left)); }
+  .button, button, select, input[type="text"], input[type="search"] {
+    touch-action: manipulation;
+  }
+  .button.small { min-height: 44px; }
+  .filter-input { min-height: 44px; font-size: 16px; }
+  .page-head { min-width: 0; }
+  h1 { font-size: clamp(23px, 6vw, 28px); line-height: 1.2; }
+  .summary strong { overflow-wrap: anywhere; }
+  .panel { min-width: 0; }
+  /* History controls: time range + refresh side by side, not 3 rows. */
+  .history-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    width: 100%;
+    margin: 12px 0 16px;
+  }
+  .history-toolbar .filter-input { grid-column: auto; width: 100%; min-width: 0; }
+  .history-toolbar .button {
+    width: auto;
+    min-width: 102px;
+    min-height: 44px;
+    padding: 8px 11px;
+    white-space: nowrap;
+  }
+  .history-filters {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+    gap: 10px;
+    margin: 12px 0;
+  }
+  .history-field { min-width: 0; }
+  .history-field label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 13px;
+  }
+  .history-field .filter-input {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
+    font-size: 16px;
+  }
+  .history-graph { min-width: 0; width: 100%; }
+}
+@media (max-width: 360px) {
+  .mobile-current-page { max-width: 29vw; }
+  .mobile-nav > summary { padding: 0 9px; gap: 6px; }
+  .brand { font-size: 17px; }
+  .history-filters { grid-template-columns: 1fr; }
+}
 "#;
 
 const SCRIPT: &str = r#"
@@ -4358,23 +4517,41 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{title} — VPN UI</title>
 <style>{style}</style>
 </head>
 <body>
 <div class="layout">
-<nav>
+<nav aria-label="Разделы VPN UI">
   <div class="brand">VPN UI</div>
-  <a class="nav-link{overview_active}" href="/">Обзор</a>
-  <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-  <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
-  <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
-  <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
-  <a class="nav-link{history_active}" href="/history">История</a>
-  <a class="nav-link{settings_active}" href="/settings">Настройки</a>
+  <div class="nav-links-desktop">
+    <a class="nav-link{overview_active}" href="/">Обзор</a>
+    <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
+    <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
+    <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
+    <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
+    <a class="nav-link{history_active}" href="/history">История</a>
+    <a class="nav-link{settings_active}" href="/settings">Настройки</a>
+  </div>
+  <details class="mobile-nav">
+    <summary aria-label="Меню разделов VPN UI">
+      <span class="mobile-current-page">{title}</span>
+      <span class="mobile-menu-icon" aria-hidden="true">☰</span>
+      <span>Меню</span>
+    </summary>
+    <div class="mobile-nav-links">
+      <a class="nav-link{overview_active}" href="/">Обзор</a>
+      <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
+      <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
+      <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
+      <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
+      <a class="nav-link{history_active}" href="/history">История</a>
+      <a class="nav-link{settings_active}" href="/settings">Настройки</a>
+    </div>
+  </details>
 </nav>
-<main>{body}</main>
+<main id="main-content">{body}</main>
 </div>
 <script>{script}</script>
 <script>{tailscale_script}</script>
@@ -4397,6 +4574,30 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
 #[cfg(test)]
 mod empty_peer_table_tests {
     use super::*;
+
+    #[test]
+    fn mobile_menu_is_keyboard_accessible_and_desktop_layout_is_preserved() {
+        let page = layout("История", "<p>probe</p>");
+        assert!(page.contains("<details class=\"mobile-nav\">"));
+        assert!(page.contains("<summary aria-label=\"Меню разделов VPN UI\">"));
+        assert!(page.contains("<div class=\"nav-links-desktop\">"));
+        assert!(page.contains("<div class=\"mobile-nav-links\">"));
+        assert!(page.contains("<span class=\"mobile-current-page\">История</span>"));
+        assert!(page.contains("<main id=\"main-content\">"));
+        assert!(STYLE.contains("@media (max-width: 900px)"));
+        assert!(STYLE.contains(".mobile-nav > summary:focus-visible"));
+        assert!(STYLE.contains("min-height: 46px"));
+        for link in [
+            "/wireguard",
+            "/amneziawg",
+            "/amneziawg31",
+            "/tailscale",
+            "/history",
+            "/settings",
+        ] {
+            assert_eq!(page.matches(&format!("href=\"{link}\"")).count(), 2);
+        }
+    }
 
     #[test]
     fn tailscale_ping_rejects_non_overlay_and_unknown_targets() {

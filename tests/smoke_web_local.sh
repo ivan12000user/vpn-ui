@@ -181,6 +181,11 @@ print("HISTORY NOT INSTALLED PASS")
 PY
 curl --silent --show-error --fail --max-time 8 "$base/history"   -o "$tmp/history.html"
 grep -F 'id="hist-graph"' "$tmp/history.html" >/dev/null
-echo 'HISTORY PAGE PASS'
+grep -F '<details class="mobile-nav">' "$tmp/history.html" >/dev/null
+grep -F 'aria-label="Меню разделов VPN UI"' "$tmp/history.html" >/dev/null
+grep -F 'class="nav-links-desktop"' "$tmp/history.html" >/dev/null
+grep -F 'class="history-filters"' "$tmp/history.html" >/dev/null
+grep -F 'max-width: 900px' "$tmp/history.html" >/dev/null
+echo 'MOBILE MENU AND HISTORY CONTROLS PASS'
 
 echo 'LOCALHOST SMOKE PASS (no root, no VPN tunnels, no external access)'
