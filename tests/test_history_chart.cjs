@@ -19,7 +19,13 @@ class FakeNode {
     this.dataset = {};
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
-  appendChild(child) { this.children.push(child); return child; }
+  appendChild(child) {
+    if (this.tagName === 'hist-peer' && this.children.length === 0) {
+      this.value = child.value;
+    }
+    this.children.push(child);
+    return child;
+  }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = [...children]; }
   addEventListener() {}
