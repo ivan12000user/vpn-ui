@@ -72,7 +72,7 @@ async function testScenario(points, expectedMarkers, lineContains, mobile=false)
   assert.ok(path);
   if (lineContains) assert.ok(path.attributes.d.includes(lineContains), path.attributes.d);
   assert.match(element('hist-uptime').textContent, /2\/3 \(66\.7%\)/);
-  return {dots,path};
+  return {dots,path,chart};
 }
 
 (async()=>{
@@ -105,5 +105,11 @@ async function testScenario(points, expectedMarkers, lineContains, mobile=false)
   ],3);
   assert.equal(failed.dots.filter(d=>d.attributes.fill==='#e05656').length,1);
   assert.equal((failed.path.attributes.d.match(/M/g)||[]).length,2);
-  console.log('HISTORY SVG: single Ping, unknown gap and explicit failure PASS');
+  const withoutSuccess = await testScenario([
+    {ts:now-900,ping_ok:0,rtt_ms:null},
+    {ts:now-600,ping_ok:null,rtt_ms:null}
+  ],1,undefined,true);
+  assert.ok(withoutSuccess.chart.children.some(n=>
+    n.tagName==='text' && n.textContent==='Нет успешных Ping за период'));
+  console.log('HISTORY SVG: single Ping, unknown gap, explicit failure and empty chart PASS');
 })().catch(error=>{console.error(error);process.exitCode=1});

@@ -186,6 +186,8 @@ grep -F 'aria-label="Меню разделов VPN UI"' "$tmp/history.html" >/de
 grep -F 'class="nav-links-desktop"' "$tmp/history.html" >/dev/null
 grep -F 'class="history-filters"' "$tmp/history.html" >/dev/null
 grep -F 'max-width: 900px' "$tmp/history.html" >/dev/null
+grep -F 'grid-template-columns: repeat(2, minmax(0, 1fr));' "$tmp/ts-page.html" >/dev/null
+echo 'COMPACT TAILSCALE CARDS PASS'
 echo 'MOBILE MENU AND HISTORY CONTROLS PASS'
 
 echo 'LOCALHOST SMOKE PASS (no root, no VPN tunnels, no external access)'
