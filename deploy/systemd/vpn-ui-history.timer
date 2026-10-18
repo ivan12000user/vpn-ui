@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect VPN UI reachability measurements every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=vpn-ui-history.service
+
+[Install]
+WantedBy=timers.target

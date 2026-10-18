@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Bounded, read-only VPN UI history collector and SQLite query utility.
+
+Run as the unprivileged vpn-ui service account. Uses ONLY localhost status
+and ping endpoints, never mutates VPN configuration or tailscaled.
+"""
+import concurrent.futures
+import json
+import os
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+DB_DEFAULT = "/var/lib/vpn-ui/history/metrics.sqlite3"
+URL = "http://127.0.0.1:8090"
+PROVIDERS = ("wireguard", "amneziawg", "amneziawg31", "tailscale")
+MAX_PEERS = 128
+MAX_PROBES = 16
+RETENTION = 14 * 86400
+
+def db_path():
+    return Path(os.environ.get("VPN_UI_HISTORY_DB", DB_DEFAULT))
+
+def connect():
+    path = db_path()
+    if not path.parent.is_dir():
+        raise RuntimeError("History directory is not installed")
+    db = sqlite3.connect(path, timeout=8)
+    db.execute("PRAGMA busy_timeout=8000")
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS samples (
+          ts INTEGER NOT NULL,
+          provider TEXT NOT NULL,
+          peer_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          ip TEXT NOT NULL,
+          online INTEGER,
+          ping_ok INTEGER,
+          rtt_ms REAL,
+          path TEXT NOT NULL DEFAULT '',
+          relay TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (ts, provider, peer_id)
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS ix_history_time ON samples(ts)")
+    return db
+
+def request_json(route, body=None, timeout=12):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    req = urllib.request.Request(URL + route, data=data, headers=headers,
+                                 method="POST" if body is not None else "GET")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as response:
+        if response.status != 200:
+            raise RuntimeError("HTTP {}".format(response.status))
+        raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise RuntimeError("Local VPN status too large")
+        return json.loads(raw)
+
+def valid_peer(peer, provider, now):
+    if not isinstance(peer, dict):
+        return None
+    if provider == "tailscale":
+        key = peer.get("ip")
+        ip = key
+        label = peer.get("hostname") or ip
+        online = 1 if peer.get("online") is True else 0 if peer.get("online") is False else None
+    else:
+        key = peer.get("public_key")
+        ip = peer.get("vpn_ip")
+        label = peer.get("name") or ip or "VPN peer"
+        handshake = peer.get("latest_handshake")
+        # A recent handshake is evidence of activity, NOT proof of continuous
+        # reachability; show it separately from actual ping success.
+        online = int(isinstance(handshake, int) and 0 <= now - handshake <= 180)
+    if not isinstance(key, str) or not 1 <= len(key) <= 128:
+        return None
+    if not isinstance(ip, str) or not 1 <= len(ip) <= 48:
+        ip = ""
+    if not isinstance(label, str):
+        label = str(key)
+    return {"provider":provider,"peer_id":key,"label":label[:100],
+            "ip":ip,"online":online,"ping_ok":None,"rtt_ms":None,
+            "path":"","relay":""}
+
+def gather(now):
+    peers = []
+    failures = []
+    for provider in PROVIDERS:
+        try:
+            status = request_json("/api/{}/status".format(provider), timeout=18)
+            if not isinstance(status, dict) or status.get("error"):
+                raise RuntimeError("VPN provider status unavailable")
+            items = status.get("peers") or []
+            if not isinstance(items, list):
+                raise RuntimeError("Invalid peer inventory")
+            for item in items[:MAX_PEERS]:
+                row = valid_peer(item, provider, now)
+                if row:
+                    peers.append(row)
+        except (ValueError, OSError, RuntimeError, urllib.error.URLError) as exc:
+            failures.append(provider + ": " + type(exc).__name__)
+    return peers, failures
+
+def probe(row):
+    if not row["ip"]:
+        return row
+    provider = row["provider"]
+    route = ("/api/tailscale/overlay-ping" if provider == "tailscale"
+             else "/api/{}/ping".format(provider))
+    data = {"ip":row["ip"]} if provider == "tailscale" else {"public_key":row["peer_id"]}
+    try:
+        answer = request_json(route, data, timeout=23)
+        if isinstance(answer, dict):
+            row["ping_ok"] = int(answer.get("ok") is True)
+            ms = answer.get("avg_ms")
+            row["rtt_ms"] = float(ms) if isinstance(ms, (int,float)) and 0 <= ms <= 60000 else None
+            if row["ping_ok"] == 0:
+                row["rtt_ms"] = None
+            row["path"] = str(answer.get("path") or "")[:16]
+            row["relay"] = str(answer.get("relay") or "")[:32]
+    except (ValueError, OSError, RuntimeError, urllib.error.URLError):
+        # A broken HTTP API or subprocess isn't a measured network outage.
+        row["ping_ok"] = None
+    return row
+
+def collect():
+    # Round to 5-minute slots, allowing one time bucket per sampling interval.
+    now = int(time.time())
+    bucket = now // 300 * 300
+    rows, failures = gather(now)
+    # Rotate through all devices; avoid hammering every unreachable endpoint
+    # simultaneously and cap total probes per collection interval.
+    candidates = sorted((r for r in rows if r["ip"]),
+                        key=lambda p: (p["provider"],p["peer_id"]))
+    offset = (bucket // 300 * MAX_PROBES) % len(candidates) if candidates else 0
+    selected = (candidates[offset:] + candidates[:offset])[:MAX_PROBES]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(probe, selected))
+    with connect() as db:
+        db.executemany("""
+          INSERT OR REPLACE INTO samples
+          (ts,provider,peer_id,label,ip,online,ping_ok,rtt_ms,path,relay)
+          VALUES (:ts,:provider,:peer_id,:label,:ip,:online,:ping_ok,:rtt_ms,:path,:relay)
+        """, [dict(r,ts=bucket) for r in rows])
+        db.execute("DELETE FROM samples WHERE ts < ?", (bucket - RETENTION,))
+    print("History: {} peers, {} probed, warnings={}".format(len(rows),len(selected),len(failures)))
+    if failures:
+        print("; ".join(failures),file=sys.stderr)
+    return 0 if rows else 1
+
+def query(hours, provider="", peer_id=""):
+    if hours not in (24,168):
+        raise ValueError("hours must be 24 or 168")
+    if provider and provider not in PROVIDERS:
+        raise ValueError("unknown provider")
+    if len(peer_id) > 128:
+        raise ValueError("invalid peer ID")
+    if not db_path().exists():
+        return {"configured":False,"hours":hours,"peers":[],"points":[]}
+    cutoff = int(time.time()) - hours * 3600
+    with connect() as db:
+        db.row_factory = sqlite3.Row
+        peers = [dict(r) for r in db.execute("""
+           SELECT provider,peer_id,
+                  MAX(label) AS label,MAX(ip) AS ip,
+                  COUNT(*) AS samples,
+                  SUM(CASE WHEN ping_ok=1 THEN 1 ELSE 0 END) AS replies,
+                  SUM(CASE WHEN ping_ok IS NOT NULL THEN 1 ELSE 0 END) AS probes,
+                  MAX(ts) AS last_sample
+           FROM samples WHERE ts>=?
+           GROUP BY provider,peer_id
+           ORDER BY provider, label LIMIT 200
+        """, (cutoff,))]
+        points = []
+        if provider and peer_id:
+            points = [dict(r) for r in db.execute("""
+               SELECT ts,online,ping_ok,rtt_ms,path,relay FROM samples
+               WHERE ts>=? AND provider=? AND peer_id=?
+               ORDER BY ts DESC LIMIT 2100
+            """, (cutoff,provider,peer_id))]
+            points.reverse()
+    return {"configured":True,"hours":hours,"peers":peers,"points":points}
+
+def main():
+    if len(sys.argv)==2 and sys.argv[1]=="collect":
+        return collect()
+    if 3<=len(sys.argv)<=5 and sys.argv[1]=="query":
+        try:
+            hours=int(sys.argv[2])
+            provider=sys.argv[3] if len(sys.argv)>3 else ""
+            peer_id=sys.argv[4] if len(sys.argv)>4 else ""
+            print(json.dumps(query(hours,provider,peer_id),ensure_ascii=False,separators=(",",":")))
+            return 0
+        except (ValueError, sqlite3.Error, OSError) as exc:
+            print(json.dumps({"configured":False,"hours":24,"peers":[],"points":[],
+                              "error":type(exc).__name__}))
+            return 0
+    print("usage: vpn-ui-history collect | query {24|168} [provider peer-id]",file=sys.stderr)
+    return 2
+
+if __name__ == "__main__":
+    sys.exit(main())

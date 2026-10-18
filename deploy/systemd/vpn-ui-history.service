@@ -1,0 +1,17 @@
+[Unit]
+Description=VPN UI read-only history sampler
+After=vpn-ui.service
+Wants=vpn-ui.service
+
+[Service]
+Type=oneshot
+User=vpn-ui
+Group=vpn-ui
+ExecStart=/usr/local/libexec/vpn-ui-history collect
+TimeoutStartSec=190
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vpn-ui/history
+UMask=0077
