@@ -1,7 +1,6 @@
 [Unit]
 Description=VPN UI read-only history sampler
 After=vpn-ui.service
-Wants=vpn-ui.service
 
 [Service]
 Type=oneshot
