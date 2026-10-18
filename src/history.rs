@@ -191,7 +191,7 @@ const SCRIPT: &str = r#"
       const t = from + (hours*3600*k/(tickCount-1));
       const label = compact ? new Date(t*1000).toLocaleString('ru-RU',
         {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : fmt(t);
-      chart.appendChild(node('text',{x:x(t),y:height-compact*12-8,
+      chart.appendChild(node('text',{x:x(t),y:height-(compact ? 20 : 8),
         'text-anchor':k===0?'start':k===tickCount-1?'end':'middle',
         fill:'currentColor','font-size':compact ? 13 : 12},label));
     }
