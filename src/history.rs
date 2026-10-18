@@ -35,14 +35,18 @@ async fn api(Query(query): Query<HistoryQuery>) -> impl IntoResponse {
     if !allowed.contains(&provider.as_str()) || peer.len() > 128 {
         return (
             [(CACHE_CONTROL, "no-store")],
-            Json(json!({"configured":false,"hours":hours,"peers":[],"points":[],
-                "error":"invalid history request"})),
+            Json(
+                json!({"configured":false,"hours":hours,"peers":[],"points":[],
+                "error":"invalid history request"}),
+            ),
         );
     }
     let command = std::env::var("VPN_UI_HISTORY_COMMAND")
         .unwrap_or_else(|_| "/usr/local/libexec/vpn-ui-history".into());
     let mut child = Command::new(command);
-    child.args(["query", &hours.to_string(), &provider, &peer]).kill_on_drop(true);
+    child
+        .args(["query", &hours.to_string(), &provider, &peer])
+        .kill_on_drop(true);
     let result = tokio::time::timeout(Duration::from_secs(8), child.output()).await;
     let data = match result {
         Ok(Ok(out)) if out.status.success() && out.stdout.len() <= 1024 * 1024 => {
