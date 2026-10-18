@@ -31,7 +31,7 @@ class FakeNode {
   addEventListener() {}
 }
 
-async function testScenario(points, expectedMarkers, lineContains) {
+async function testScenario(points, expectedMarkers, lineContains, mobile=false) {
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, new FakeNode(id));
@@ -52,6 +52,7 @@ async function testScenario(points, expectedMarkers, lineContains) {
       createElementNS: (_ns,name)=>new FakeNode(name),
     },
     Date, Number, URLSearchParams, console,
+    window: {matchMedia: query => ({matches: mobile && query === '(max-width: 700px)'})},
     fetch: async url => ({
       ok:true,
       json: async () => String(url).includes('provider=')
@@ -64,6 +65,7 @@ async function testScenario(points, expectedMarkers, lineContains) {
   for (let i=0;i<12;i++) await new Promise(setImmediate);
   const chart = element('hist-graph').children.find(n=>n.tagName==='svg');
   assert.ok(chart,'chart SVG must exist');
+  assert.equal(chart.attributes.viewBox, mobile ? '0 0 420 270' : '0 0 900 240');
   const dots = chart.children.filter(n=>n.tagName==='circle');
   assert.equal(dots.length, expectedMarkers);
   const path = chart.children.find(n=>n.tagName==='path');
@@ -82,6 +84,11 @@ async function testScenario(points, expectedMarkers, lineContains) {
     {ts:now-400, ping_ok:null,rtt_ms:null,path:'',relay:''}
   ],1);
   assert.equal(one.dots[0].attributes.fill, '#16a34a');
+  const pixel = await testScenario([
+    {ts:now-700,ping_ok:1,rtt_ms:144.7,path:'DERP',relay:'ams'}
+  ],1,undefined,true);
+  assert.equal(pixel.dots[0].attributes.r,'5.8');
+  console.log('PIXEL HISTORY SVG: readable viewBox and touch-size data point PASS');
 
   // The skipped sample is unknown, so two short-range successes can be joined.
   const two=await testScenario([
