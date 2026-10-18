@@ -147,6 +147,7 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
   {}
 </div>
 
+<p><a href="/history">История Ping и доступности за 24 часа / 7 дней →</a></p>
 <p class="muted">Версия {}.</p>
 "#,
         dashboard_card("/wireguard", &wg),
@@ -4341,6 +4342,7 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
         ""
     };
     let tailscale_active = if title == "Tailscale" { " active" } else { "" };
+    let history_active = if title == "История" { " active" } else { "" };
     let settings_active = if title == "Настройки" {
         " active"
     } else {
@@ -4365,6 +4367,7 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
   <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
   <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
   <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
+  <a class="nav-link{history_active}" href="/history">История</a>
   <a class="nav-link{settings_active}" href="/settings">Настройки</a>
 </nav>
 <main>{body}</main>
@@ -4382,6 +4385,7 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
         amneziawg_active = amneziawg_active,
         amneziawg31_active = amneziawg31_active,
         tailscale_active = tailscale_active,
+        history_active = history_active,
         settings_active = settings_active,
     )
 }

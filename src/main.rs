@@ -1,6 +1,7 @@
 mod admin;
 mod geoip;
 mod html_polish;
+mod history;
 mod icon;
 mod settings_manage;
 mod tailscale;
@@ -91,6 +92,7 @@ async fn main() {
     };
 
     let app = web::router(state.clone())
+        .merge(history::router())
         .merge(settings_manage::router(state))
         .merge(icon::router())
         .layer(axum::middleware::from_fn(
