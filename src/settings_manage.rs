@@ -33,9 +33,8 @@ pub async fn redirect_legacy_settings(request: Request, next: Next) -> Response 
 }
 
 async fn settings_manage_page(State(state): State<AppState>) -> impl IntoResponse {
-    let (wg, awg, awg31) = tokio::join!(
+    let (wg, awg31) = tokio::join!(
         helper_request(&state.wg_manage_command, json!({"op": "settings_get"})),
-        helper_request(&state.awg_manage_command, json!({"op": "settings_get"})),
         helper_request(&state.awg31_manage_command, json!({"op": "settings_get"})),
     );
 
@@ -57,13 +56,12 @@ async fn settings_manage_page(State(state): State<AppState>) -> impl IntoRespons
 
 <div class="settings-note">
   Здесь меняются только значения, используемые при создании новых пиров.
-  Существующие пиры, wg0/awg0/awg1 и серверные интерфейсы не изменяются.
+  Существующие пиры, wg0/awg1 и серверные интерфейсы не изменяются.
   Доступ ко всей панели защищается общей авторизацией при входе.
 </div>
 
 <div class="settings-grid safe-settings-grid">
   {wg}
-  {awg}
   {awg31}
 </div>
 
@@ -141,7 +139,6 @@ async fn settings_manage_page(State(state): State<AppState>) -> impl IntoRespons
 {script}
 "#,
         wg = settings_form("wireguard", "WireGuard", &wg),
-        awg = settings_form("amneziawg", "AmneziaWG 2.0 · awg0", &awg),
         awg31 = settings_form("amneziawg31", "AmneziaWG 3.1 · awg1", &awg31),
         script = SAFE_SETTINGS_SCRIPT,
     );
@@ -150,9 +147,8 @@ async fn settings_manage_page(State(state): State<AppState>) -> impl IntoRespons
 }
 
 async fn settings_interfaces_page(State(state): State<AppState>) -> impl IntoResponse {
-    let (wg, awg, awg31) = tokio::join!(
+    let (wg, awg31) = tokio::join!(
         read_interface_settings(&state.wg_settings_command),
-        read_interface_settings(&state.awg_settings_command),
         read_interface_settings(&state.awg31_settings_command),
     );
 
@@ -221,7 +217,6 @@ async fn settings_interfaces_page(State(state): State<AppState>) -> impl IntoRes
 
 <div class="settings-grid">
   {wg}
-  {awg}
   {awg31}
 </div>
 
@@ -239,12 +234,6 @@ async fn settings_interfaces_page(State(state): State<AppState>) -> impl IntoRes
 </style>
 "#,
         wg = interface_settings_panel("WireGuard", &state.wireguard.interface, &wg, &wg_fields,),
-        awg = interface_settings_panel(
-            "AmneziaWG 2.0",
-            &state.amneziawg.interface,
-            &awg,
-            &awg_fields,
-        ),
         awg31 = interface_settings_panel(
             "AmneziaWG 3.1",
             &state.amneziawg31.interface,

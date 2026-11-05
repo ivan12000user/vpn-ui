@@ -73,8 +73,8 @@ PROVIDERS = {
         "inventory": pathlib.Path("/var/lib/vpn-ui/secure/amneziawg31"),
         "network": ipaddress.ip_network("10.88.88.0/24"),
         "client_default_allowed": ["10.88.88.0/24"],
-        "candidate": pathlib.Path("/run/vpnuiawg31.conf"),
-        "stripped": pathlib.Path("/run/vpnuiawg31.sync"),
+        "candidate": pathlib.Path("/var/lib/vpn-ui/work/vpnuiawg31.conf"),
+        "stripped": pathlib.Path("/var/lib/vpn-ui/work/vpnuiawg31.sync"),
     },
 }
 

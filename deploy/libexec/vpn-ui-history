@@ -16,7 +16,7 @@ from pathlib import Path
 
 DB_DEFAULT = "/var/lib/vpn-ui/history/metrics.sqlite3"
 URL = "http://127.0.0.1:8090"
-PROVIDERS = ("wireguard", "amneziawg", "amneziawg31", "tailscale")
+PROVIDERS = ("wireguard", "amneziawg31", "tailscale")
 MAX_PEERS = 128
 MAX_PROBES = 16
 RETENTION = 14 * 86400

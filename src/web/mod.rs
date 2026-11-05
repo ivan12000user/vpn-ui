@@ -65,7 +65,6 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/wireguard", get(wireguard_page))
-        .route("/amneziawg", get(amneziawg_page))
         .route("/amneziawg31", get(amneziawg31_page))
         .route("/tailscale", get(tailscale_page))
         .route("/api/tailscale/status", get(tailscale_api))
@@ -83,22 +82,15 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/wireguard/manage",
             post(crate::admin::wireguard_manage),
         )
-        .route(
-            "/api/admin/amneziawg/manage",
-            post(crate::admin::amneziawg_manage),
-        )
         .route("/api/wireguard/inventory", get(wireguard_inventory))
         .route(
             "/api/admin/amneziawg31/manage",
             post(crate::admin::amneziawg31_manage),
         )
-        .route("/api/amneziawg/inventory", get(amneziawg_inventory))
         .route("/api/amneziawg31/inventory", get(amneziawg31_inventory))
         .route("/api/wireguard/status", get(wireguard_api))
-        .route("/api/amneziawg/status", get(amneziawg_api))
         .route("/api/amneziawg31/status", get(amneziawg31_api))
         .route("/api/wireguard/ping", post(wireguard_ping))
-        .route("/api/amneziawg/ping", post(amneziawg_ping))
         .route("/api/amneziawg31/ping", post(amneziawg31_ping))
         .route("/healthz", get(health))
         .with_state(state)
@@ -128,9 +120,8 @@ async fn admin_auth() -> impl IntoResponse {
 }
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
-    let (wg, awg, awg31, ts) = tokio::join!(
+    let (wg, awg31, ts) = tokio::join!(
         wireguard::status(&state.wireguard),
-        amneziawg::status(&state.amneziawg),
         amneziawg::status(&state.amneziawg31),
         tailscale::status()
     );
@@ -144,14 +135,12 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
   {}
   {}
   {}
-  {}
 </div>
 
 <p><a href="/history">История Ping и доступности за 24 часа / 7 дней →</a></p>
 <p class="muted">Версия {}.</p>
 "#,
         dashboard_card("/wireguard", &wg),
-        dashboard_card("/amneziawg", &awg),
         dashboard_card("/amneziawg31", &awg31),
         tailscale_dashboard_card(&ts),
         env!("CARGO_PKG_VERSION")
@@ -4595,7 +4584,6 @@ const TAILSCALE_SCRIPT: &str = r#"
 pub(crate) fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
-    let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
     let amneziawg31_active = if title == "AmneziaWG 3.1" {
         " active"
     } else {
@@ -4629,7 +4617,6 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
   <div class="nav-links-desktop">
     <a class="nav-link{overview_active}" href="/">Обзор</a>
     <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-    <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
     <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
     <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
     <a class="nav-link{history_active}" href="/history">История</a>
@@ -4644,7 +4631,6 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
     <div class="mobile-nav-links">
       <a class="nav-link{overview_active}" href="/">Обзор</a>
       <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-      <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
       <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
       <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
       <a class="nav-link{history_active}" href="/history">История</a>
@@ -4664,7 +4650,6 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
         tailscale_script = TAILSCALE_SCRIPT,
         overview_active = overview_active,
         wireguard_active = wireguard_active,
-        amneziawg_active = amneziawg_active,
         amneziawg31_active = amneziawg31_active,
         tailscale_active = tailscale_active,
         history_active = history_active,
@@ -4714,7 +4699,6 @@ mod empty_peer_table_tests {
         assert!(STYLE.contains("min-height: 46px"));
         for link in [
             "/wireguard",
-            "/amneziawg",
             "/amneziawg31",
             "/tailscale",
             "/history",
