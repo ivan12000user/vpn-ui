@@ -1,0 +1,19 @@
+# Isolated protection for Nginx Basic Auth on pl-vmpico.
+# Uses the distribution-supplied nginx-http-auth filter.
+[vpn-ui-auth]
+enabled = true
+filter = nginx-http-auth
+mode = normal
+
+backend = auto
+logpath = /var/log/nginx/vpn-ui-auth-error.log
+
+port = 443
+protocol = tcp
+banaction = iptables-multiport
+
+maxretry = 5
+findtime = 600
+bantime = 3600
+
+ignoreip = 127.0.0.1/8 ::1
