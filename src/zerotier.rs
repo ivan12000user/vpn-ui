@@ -190,6 +190,30 @@ fn flag(value: Option<bool>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_failures_are_bounded_and_do_not_leak_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vpn-ui-zt-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cli");
+        let cli = path.to_str().unwrap();
+        for (body, expected) in [
+            ("echo SECRET >&2; exit 1", "CLI failed or permission denied"),
+            ("exec sleep 10", "CLI timed out"),
+            ("exec head -c 1048577 /dev/zero", "CLI output too large"),
+        ] {
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(read(cli, "info").await.unwrap_err(), expected);
+        }
+        std::fs::write(&path, "#!/bin/sh\necho not-json\n").unwrap();
+        let mut errors = Vec::new();
+        assert!(collect::<Node>(cli, "info", &mut errors).await.is_none());
+        assert_eq!(errors, ["info: Invalid JSON schema"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(read(cli, "info").await.is_err());
+    }
     #[test]
     fn whitelist_drops_secrets_and_preserves_unknown_state() {
         let node: Node = serde_json::from_str(r#"{"address":"abc","secret":"TOKEN"}"#).unwrap();
