@@ -78,6 +78,13 @@ print(json.dumps(data[sys.argv[2]]))
         self.assertNotIn('SECRET', body)
         self.assertEqual(self.calls.read_text().splitlines(), ['-j info', '-j listnetworks', '-j listpeers'])
 
+    def test_settings_do_not_offer_awg2(self):
+        for route in ['/settings/manage', '/settings/interfaces', '/history']:
+            with self.get(route) as response:
+                body = response.read().decode()
+            self.assertNotIn('AmneziaWG 2.0', body)
+            self.assertNotIn('value="amneziawg"', body)
+
     def test_no_mutation_or_awg2_routes(self):
         for route, method, code in [('/api/zerotier/status', 'POST', 405), ('/zerotier', 'POST', 405),
                                     ('/amneziawg', 'GET', 404), ('/api/amneziawg/status', 'GET', 404),
