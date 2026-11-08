@@ -36,12 +36,14 @@ data={{'info':{{'address':'abcdef0123','online':True,'authtoken':'SECRET'}},
 'listpeers':[{{'address':'0123456789','role':'PLANET','latency':-1}}]}}
 print(json.dumps(data[sys.argv[2]]))
 ''')
+        history = cls.work / "history"
+        script(history, '#!/bin/sh\nprintf \'%s\\n\' \'{"configured":true,"peers":[{"provider":"amneziawg","peer_id":"old"},{"provider":"wireguard","peer_id":"kept"}],"points":[]}\'\n')
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         cls.base = f"http://127.0.0.1:{port}"
         env = dict(os.environ, VPN_UI_ZEROTIER_COMMAND=str(cli),
-                   VPN_UI_LISTEN=f"127.0.0.1:{port}", VPN_UI_GEOIP_CACHE=str(cls.work / "geo.json"))
+                   VPN_UI_LISTEN=f"127.0.0.1:{port}", VPN_UI_HISTORY_COMMAND=str(history), VPN_UI_GEOIP_CACHE=str(cls.work / "geo.json"))
         cls.log = (cls.work / "server.log").open("w")
         cls.proc = subprocess.Popen([str(ROOT / "target/release/vpn-ui")], env=env, stdout=cls.log, stderr=cls.log)
         for _ in range(100):
@@ -78,6 +80,13 @@ print(json.dumps(data[sys.argv[2]]))
         self.assertNotIn('SECRET', body)
         self.assertEqual(self.calls.read_text().splitlines(), ['-j info', '-j listnetworks', '-j listpeers'])
 
+    def test_history_hides_awg2_without_changing_collector(self):
+        with self.get('/api/history') as response:
+            data = json.load(response)
+        self.assertEqual([p['provider'] for p in data['peers']], ['wireguard'])
+        with self.get('/api/history?provider=amneziawg') as response:
+            self.assertIn('invalid', json.load(response)['error'])
+
     def test_settings_do_not_offer_awg2(self):
         for route in ['/settings/manage', '/settings/interfaces', '/history']:
             with self.get(route) as response:
@@ -96,7 +105,7 @@ print(json.dumps(data[sys.argv[2]]))
 
 @unittest.skipUnless(os.name == "posix", "Linux shell integration")
 class Installer(unittest.TestCase):
-    def run_install(self, fail=False):
+    def run_install(self, fail=False, bad_checksum=False):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             commands = work / 'commands'
@@ -133,7 +142,6 @@ elif url.endswith('/zerotier'): print('zt-grid')
             source = source.replace('/etc/sudoers.d/vpn-ui-zerotier', str(sudoers))
             source = source.replace('/root/vpn-ui-backups', str(work / 'backups'))
             source = source.replace('/run/lock/vpn-ui-v088.lock', str(work / 'lock'))
-            source = source.replace('> "$BACKUP/zerotier.html"', '> "$BACKUP/zerotier.html"')
             # Fixture keeps the curl output redirections and runs the actual rollback code.
             candidate = work / 'installer'
             candidate.write_text(source)
@@ -141,15 +149,18 @@ elif url.endswith('/zerotier'): print('zt-grid')
             (work / 'deploy/sudoers').mkdir()
             for rel in ['bin/vpn-ui-zerotier-ro', 'sudoers/vpn-ui-zerotier']:
                 (work / 'deploy' / rel).write_bytes((ROOT / 'deploy' / rel).read_bytes())
-            result = subprocess.run(['bash', str(candidate), hashlib.sha256(b'NEW').hexdigest()], cwd=work,
+            result = subprocess.run(['bash', str(candidate), hashlib.sha256(b'WRONG' if bad_checksum else b'NEW').hexdigest()], cwd=work,
                                     env=dict(os.environ, PATH=str(commands) + ':' + os.environ['PATH']),
                                     capture_output=True, text=True, timeout=20)
-            self.assertEqual(result.returncode, 1 if fail else 0, result.stdout + result.stderr)
-            self.assertEqual(binary.read_text(), 'OLD' if fail else 'NEW')
-            self.assertEqual(wrapper.exists(), not fail)
-            self.assertEqual(sudoers.exists(), not fail)
-            calls = log.read_text().splitlines()
+            self.assertEqual(result.returncode, 1 if fail or bad_checksum else 0, result.stdout + result.stderr)
+            self.assertEqual(binary.read_text(), 'OLD' if fail or bad_checksum else 'NEW')
+            self.assertEqual(wrapper.exists(), not (fail or bad_checksum))
+            self.assertEqual(sudoers.exists(), not (fail or bad_checksum))
+            calls = log.read_text().splitlines() if log.exists() else []
             self.assertTrue(all(line == 'restart vpn-ui.service' for line in calls if line.startswith('restart')))
+
+    def test_checksum_mismatch_does_not_change_installation(self):
+        self.run_install(bad_checksum=True)
 
     def test_success(self):
         self.run_install()

@@ -13,6 +13,12 @@ CHANGED=0
 SUCCESS=0
 SERVICES=(nginx wg-quick@wg0 awg-quick@awg0 vpn-ui-awg31 tailscaled vpn-ui-history.timer zerotier-one)
 
+snapshot() {
+  local svc=$1 destination=$2
+  systemctl show "$svc" -p LoadState -p ActiveState -p SubState -p MainPID -p ActiveEnterTimestampMonotonic > "$destination" ||
+    grep -Fx 'LoadState=not-found' "$destination" >/dev/null
+}
+
 health_version() {
   curl --noproxy '*' -fsS --max-time 5 "$BASE/healthz" |
     python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'
@@ -58,7 +64,7 @@ BACKUP=$(mktemp -d /root/vpn-ui-backups/zerotier-v088-XXXXXXXX)
 cp -a "$BIN" "$BACKUP/vpn-ui.0.8.7"
 systemctl cat vpn-ui.service > "$BACKUP/service-before.txt"
 for svc in "${SERVICES[@]}"; do
-  systemctl show "$svc" -p ActiveState -p SubState -p MainPID -p ActiveEnterTimestampMonotonic > "$BACKUP/$svc.before"
+  snapshot "$svc" "$BACKUP/$svc.before"
 done
 install -m 0755 target/release/vpn-ui "$BIN.v088"
 [[ $(sha256sum "$BIN.v088" | cut -d' ' -f1) == "$1" ]]
@@ -91,7 +97,7 @@ for route in wireguard amneziawg31 tailscale history settings; do
   curl --noproxy '*' -fsS --max-time 15 "$BASE/$route" -o /dev/null
 done
 for svc in "${SERVICES[@]}"; do
-  systemctl show "$svc" -p ActiveState -p SubState -p MainPID -p ActiveEnterTimestampMonotonic > "$BACKUP/$svc.after"
+  snapshot "$svc" "$BACKUP/$svc.after"
   cmp "$BACKUP/$svc.before" "$BACKUP/$svc.after"
 done
 SUCCESS=1

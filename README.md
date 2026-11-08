@@ -94,3 +94,9 @@ Never commit private keys, VPN client configurations, secret headers, inventorie
 ## License
 
 MIT.
+
+## VPN UI 0.8.8 candidate
+
+[ZeroTier monitoring and guarded v0.8.7 upgrade](deploy/ZEROTIER.md): read-only
+local node/networks/known peers, responsive mobile cards, AWG2 removed from the
+web interface while preserving its running tunnel and configurations.
