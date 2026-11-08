@@ -31,7 +31,7 @@ async fn api(Query(query): Query<HistoryQuery>) -> impl IntoResponse {
     };
     let provider = query.provider.unwrap_or_default();
     let peer = query.peer.unwrap_or_default();
-    let allowed = ["", "wireguard", "amneziawg", "amneziawg31", "tailscale"];
+    let allowed = ["", "wireguard", "amneziawg31", "tailscale"];
     if !allowed.contains(&provider.as_str()) || peer.len() > 128 {
         return (
             [(CACHE_CONTROL, "no-store")],
@@ -48,12 +48,17 @@ async fn api(Query(query): Query<HistoryQuery>) -> impl IntoResponse {
         .args(["query", &hours.to_string(), &provider, &peer])
         .kill_on_drop(true);
     let result = tokio::time::timeout(Duration::from_secs(8), child.output()).await;
-    let data = match result {
+    let mut data = match result {
         Ok(Ok(out)) if out.status.success() && out.stdout.len() <= 1024 * 1024 => {
             serde_json::from_slice::<Value>(&out.stdout).unwrap_or_else(|_| empty(hours))
         }
         _ => empty(hours),
     };
+    for key in ["peers", "points"] {
+        if let Some(rows) = data.get_mut(key).and_then(Value::as_array_mut) {
+            rows.retain(|row| row.get("provider").and_then(Value::as_str) != Some("amneziawg"));
+        }
+    }
     ([(CACHE_CONTROL, "no-store")], Json(data))
 }
 
@@ -91,7 +96,6 @@ async fn page() -> Html<String> {
       <select id="hist-provider" class="filter-input">
         <option value="">Все</option>
         <option value="wireguard">WireGuard</option>
-        <option value="amneziawg">AmneziaWG 2.0</option>
         <option value="amneziawg31">AmneziaWG 3.1</option>
         <option value="tailscale">Tailscale</option>
       </select>
@@ -126,7 +130,7 @@ const SCRIPT: &str = r#"
   const namespace = 'http://www.w3.org/2000/svg';
   const protocol = {
     tailscale: 'Tailscale', wireguard: 'WireGuard',
-    amneziawg: 'AmneziaWG 2.0', amneziawg31: 'AmneziaWG 3.1'
+    amneziawg31: 'AmneziaWG 3.1'
   };
   let peers = [];
   let busy = false;

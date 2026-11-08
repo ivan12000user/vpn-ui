@@ -259,7 +259,6 @@ async fn peer_identity(state: &AppState, provider: &str, key: &str) -> (String, 
     let status = match provider {
         "wireguard" => wireguard::status(&state.wireguard).await,
 
-        "amneziawg" => amneziawg::status(&state.amneziawg).await,
         "amneziawg31" => amneziawg::status(&state.amneziawg31).await,
 
         _ => {
@@ -284,7 +283,6 @@ async fn load_client_config(state: &AppState, provider: &str, key: &str) -> Resu
     let command = match provider {
         "wireguard" => &state.wg_client_config_command,
 
-        "amneziawg" => &state.awg_client_config_command,
         "amneziawg31" => &state.awg31_client_config_command,
 
         _ => return Err("unknown provider".to_string()),
@@ -335,13 +333,6 @@ pub async fn wireguard_manage(
     Json(request): Json<Value>,
 ) -> Response {
     manage_request(&state.wg_manage_command, request).await
-}
-
-pub async fn amneziawg_manage(
-    State(state): State<AppState>,
-    Json(request): Json<Value>,
-) -> Response {
-    manage_request(&state.awg_manage_command, request).await
 }
 
 pub async fn amneziawg31_manage(
