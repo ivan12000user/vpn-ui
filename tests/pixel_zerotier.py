@@ -15,6 +15,7 @@ try:
             assert not errors, errors
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
             assert page.locator('.zt-card').count() == 3
+            assert page.locator('.zt-refresh').bounding_box()['height'] >= 44
             if width < 768:
                 page.locator('.mobile-nav > summary').click()
                 link = page.locator('.mobile-nav a[href="/zerotier"]')

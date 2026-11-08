@@ -155,8 +155,8 @@ pub fn dashboard_card() -> String {
 pub fn page(status: &Status) -> String {
     let mut html = String::from(
         r#"<h1>ZeroTier</h1><p>Только чтение локального состояния. Обновление — при открытии страницы, кэш 10 секунд.</p>
-<p><a class="button" href="/zerotier">↻ Обновить</a></p>
-<style>.zt-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px}.zt-card{min-width:0;overflow-wrap:anywhere}.zt-card dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.zt-card dd{margin:0;min-width:0}.zt-card dt{color:#94a3b8}</style>"#,
+<p><a class="button zt-refresh" href="/zerotier">↻ Обновить</a></p>
+<style>.zt-refresh{display:inline-flex;align-items:center;min-height:44px}.zt-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px}.zt-card{min-width:0;overflow-wrap:anywhere}.zt-card dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.zt-card dd{margin:0;min-width:0}.zt-card dt{color:#94a3b8}</style>"#,
     );
     for error in &status.errors {
         html.push_str(&format!(
@@ -176,7 +176,7 @@ pub fn page(status: &Status) -> String {
             html.push_str(&format!("<section class=\"panel zt-card\"><h3>{}</h3><dl><dt>ID</dt><dd>{}</dd><dt>Состояние</dt><dd>{}</dd><dt>Тип</dt><dd>{}</dd><dt>Интерфейс</dt><dd>{}</dd><dt>Адреса</dt><dd>{}</dd></dl></section>", text(&n.name), text(&n.id), text(&n.status), text(&n.kind), text(&n.port_device_name), esc(&n.assigned_addresses.join(", "))));
         }
     }
-    html.push_str("</div><h2>Известные узлы</h2><p>Это локальные VL1 peers, включая PLANET/MOON, а не полный список участников сети. Наличие в списке и latency не подтверждают текущую доступность. −1 означает отсутствие измерения. Ping и история ZeroTier не собираются.</p><div class=\"zt-grid\">");
+    html.push_str("</div><h2>Известные узлы</h2><p>Узлы, известные этому серверу, включая служебные PLANET/MOON. Это не полный список участников сети и не подтверждение доступности. Задержка — последнее известное измерение; «—» означает отсутствие данных. История и активные проверки ZeroTier не собираются.</p><div class=\"zt-grid\">");
     if let Some(peers) = &status.peers {
         if peers.is_empty() {
             html.push_str("<p>Нет известных узлов.</p>");
