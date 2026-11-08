@@ -20,19 +20,15 @@ use tokio::process::Command;
 #[derive(Clone)]
 pub struct AppState {
     pub wireguard: ProviderConfig,
-    pub amneziawg: ProviderConfig,
     pub amneziawg31: ProviderConfig,
     pub ping_command: String,
     pub wg_settings_command: String,
-    pub awg_settings_command: String,
     pub awg31_settings_command: String,
 
     pub wg_client_config_command: String,
-    pub awg_client_config_command: String,
     pub awg31_client_config_command: String,
 
     pub wg_manage_command: String,
-    pub awg_manage_command: String,
     pub awg31_manage_command: String,
 
     pub geoip: GeoIpService,
@@ -65,8 +61,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/wireguard", get(wireguard_page))
-        .route("/amneziawg", get(amneziawg_page))
         .route("/amneziawg31", get(amneziawg31_page))
+        .route("/zerotier", get(zerotier_page))
+        .route("/api/zerotier/status", get(zerotier_api))
         .route("/tailscale", get(tailscale_page))
         .route("/api/tailscale/status", get(tailscale_api))
         .route("/api/tailscale/ping", post(tailscale_ping))
@@ -83,22 +80,15 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/wireguard/manage",
             post(crate::admin::wireguard_manage),
         )
-        .route(
-            "/api/admin/amneziawg/manage",
-            post(crate::admin::amneziawg_manage),
-        )
         .route("/api/wireguard/inventory", get(wireguard_inventory))
         .route(
             "/api/admin/amneziawg31/manage",
             post(crate::admin::amneziawg31_manage),
         )
-        .route("/api/amneziawg/inventory", get(amneziawg_inventory))
         .route("/api/amneziawg31/inventory", get(amneziawg31_inventory))
         .route("/api/wireguard/status", get(wireguard_api))
-        .route("/api/amneziawg/status", get(amneziawg_api))
         .route("/api/amneziawg31/status", get(amneziawg31_api))
         .route("/api/wireguard/ping", post(wireguard_ping))
-        .route("/api/amneziawg/ping", post(amneziawg_ping))
         .route("/api/amneziawg31/ping", post(amneziawg31_ping))
         .route("/healthz", get(health))
         .with_state(state)
@@ -128,9 +118,8 @@ async fn admin_auth() -> impl IntoResponse {
 }
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
-    let (wg, awg, awg31, ts) = tokio::join!(
+    let (wg, awg31, ts) = tokio::join!(
         wireguard::status(&state.wireguard),
-        amneziawg::status(&state.amneziawg),
         amneziawg::status(&state.amneziawg31),
         tailscale::status()
     );
@@ -151,7 +140,7 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
 <p class="muted">Версия {}.</p>
 "#,
         dashboard_card("/wireguard", &wg),
-        dashboard_card("/amneziawg", &awg),
+        crate::zerotier::dashboard_card(),
         dashboard_card("/amneziawg31", &awg31),
         tailscale_dashboard_card(&ts),
         env!("CARGO_PKG_VERSION")
@@ -166,12 +155,6 @@ async fn wireguard_page(State(state): State<AppState>) -> impl IntoResponse {
     Html(layout("WireGuard", &provider_page("wireguard", &status)))
 }
 
-async fn amneziawg_page(State(state): State<AppState>) -> impl IntoResponse {
-    let mut status = amneziawg::status(&state.amneziawg).await;
-    enrich_status(&state.geoip, &mut status).await;
-    Html(layout("AmneziaWG", &provider_page("amneziawg", &status)))
-}
-
 async fn amneziawg31_page(State(state): State<AppState>) -> impl IntoResponse {
     let mut status = amneziawg::status(&state.amneziawg31).await;
     enrich_status(&state.geoip, &mut status).await;
@@ -183,10 +166,6 @@ async fn amneziawg31_page(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn wireguard_inventory(State(state): State<AppState>) -> impl IntoResponse {
     inventory_api(&state.wg_manage_command).await
-}
-
-async fn amneziawg_inventory(State(state): State<AppState>) -> impl IntoResponse {
-    inventory_api(&state.awg_manage_command).await
 }
 
 async fn amneziawg31_inventory(State(state): State<AppState>) -> impl IntoResponse {
@@ -356,12 +335,6 @@ async fn wireguard_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
     Json(status)
 }
 
-async fn amneziawg_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
-    let mut status = amneziawg::status(&state.amneziawg).await;
-    enrich_status(&state.geoip, &mut status).await;
-    Json(status)
-}
-
 async fn amneziawg31_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
     let mut status = amneziawg::status(&state.amneziawg31).await;
     enrich_status(&state.geoip, &mut status).await;
@@ -373,14 +346,6 @@ async fn wireguard_ping(
     Json(request): Json<PingRequest>,
 ) -> Json<PingResult> {
     let status = wireguard::status(&state.wireguard).await;
-    Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
-}
-
-async fn amneziawg_ping(
-    State(state): State<AppState>,
-    Json(request): Json<PingRequest>,
-) -> Json<PingResult> {
-    let status = amneziawg::status(&state.amneziawg).await;
     Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
 }
 
@@ -488,6 +453,21 @@ async fn tailscale_shares_api() -> impl IntoResponse {
     )
 }
 
+async fn zerotier_api() -> impl IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(crate::zerotier::status().await),
+    )
+}
+async fn zerotier_page() -> impl IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Html(layout(
+            "ZeroTier",
+            &crate::zerotier::page(&crate::zerotier::status().await),
+        )),
+    )
+}
 async fn tailscale_page() -> impl IntoResponse {
     let status = tailscale::status().await;
     Html(layout("Tailscale", &tailscale_page_body(&status)))
@@ -708,7 +688,7 @@ async fn read_settings(command: &str) -> SettingsResult {
 async fn settings_page(State(state): State<AppState>) -> impl IntoResponse {
     let (wg, awg) = tokio::join!(
         read_settings(&state.wg_settings_command),
-        read_settings(&state.awg_settings_command)
+        read_settings(&state.awg31_settings_command)
     );
 
     let wg_fields = [
@@ -756,7 +736,12 @@ async fn settings_page(State(state): State<AppState>) -> impl IntoResponse {
 </div>
 "#,
         wg = settings_panel("WireGuard", &state.wireguard.interface, &wg, &wg_fields),
-        awg = settings_panel("AmneziaWG", &state.amneziawg.interface, &awg, &awg_fields),
+        awg = settings_panel(
+            "AmneziaWG 3.1",
+            &state.amneziawg31.interface,
+            &awg,
+            &awg_fields
+        ),
     );
 
     Html(layout("Настройки", &body))
@@ -4595,7 +4580,7 @@ const TAILSCALE_SCRIPT: &str = r#"
 pub(crate) fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
-    let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
+    let zerotier_active = if title == "ZeroTier" { " active" } else { "" };
     let amneziawg31_active = if title == "AmneziaWG 3.1" {
         " active"
     } else {
@@ -4629,8 +4614,8 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
   <div class="nav-links-desktop">
     <a class="nav-link{overview_active}" href="/">Обзор</a>
     <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-    <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
     <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
+    <a class="nav-link{zerotier_active}" href="/zerotier">ZeroTier</a>
     <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
     <a class="nav-link{history_active}" href="/history">История</a>
     <a class="nav-link{settings_active}" href="/settings">Настройки</a>
@@ -4644,9 +4629,9 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
     <div class="mobile-nav-links">
       <a class="nav-link{overview_active}" href="/">Обзор</a>
       <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-      <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
       <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
-      <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
+      <a class="nav-link{zerotier_active}" href="/zerotier">ZeroTier</a>
+    <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
       <a class="nav-link{history_active}" href="/history">История</a>
       <a class="nav-link{settings_active}" href="/settings">Настройки</a>
     </div>
@@ -4664,7 +4649,7 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
         tailscale_script = TAILSCALE_SCRIPT,
         overview_active = overview_active,
         wireguard_active = wireguard_active,
-        amneziawg_active = amneziawg_active,
+        zerotier_active = zerotier_active,
         amneziawg31_active = amneziawg31_active,
         tailscale_active = tailscale_active,
         history_active = history_active,
@@ -4714,7 +4699,7 @@ mod empty_peer_table_tests {
         assert!(STYLE.contains("min-height: 46px"));
         for link in [
             "/wireguard",
-            "/amneziawg",
+            "/zerotier",
             "/amneziawg31",
             "/tailscale",
             "/history",
