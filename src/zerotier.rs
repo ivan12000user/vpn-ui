@@ -98,7 +98,7 @@ async fn collect<T: for<'de> Deserialize<'de>>(
     errors: &mut Vec<String>,
 ) -> Option<T> {
     let result = match read(cli, op).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| "Invalid JSON schema".into()),
+        Ok(bytes) => parse(&bytes, op).map_err(String::from),
         Err(e) => Err(e),
     };
     match result {
@@ -108,6 +108,15 @@ async fn collect<T: for<'de> Deserialize<'de>>(
             None
         }
     }
+}
+
+fn parse<T: for<'de> Deserialize<'de>>(bytes: &[u8], op: &str) -> Result<T, &'static str> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| "Invalid JSON schema")?;
+    if (op == "info" && !value.is_object()) || (op != "info" && !value.is_array()) {
+        return Err("Invalid JSON schema");
+    }
+    serde_json::from_value(value).map_err(|_| "Invalid JSON schema")
 }
 
 pub async fn status() -> Status {
@@ -220,7 +229,7 @@ mod tests {
         assert_eq!(node.online, None);
         assert!(!serde_json::to_string(&node).unwrap().contains("TOKEN"));
         assert!(serde_json::from_str::<Vec<Network>>("{}").is_err());
-        assert!(serde_json::from_str::<Node>("[]").is_err());
+        assert!(parse::<Node>(b"[]", "info").is_err());
     }
     #[test]
     fn renders_untrusted_names_and_partial_failure_safely() {

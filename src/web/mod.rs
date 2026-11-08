@@ -4631,7 +4631,7 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
       <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
       <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
       <a class="nav-link{zerotier_active}" href="/zerotier">ZeroTier</a>
-    <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
+      <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
       <a class="nav-link{history_active}" href="/history">История</a>
       <a class="nav-link{settings_active}" href="/settings">Настройки</a>
     </div>
