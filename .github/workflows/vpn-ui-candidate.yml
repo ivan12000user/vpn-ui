@@ -11,9 +11,11 @@ on:
       - feature/v086-pixel-mobile-ui
       - feature/v087-pixel-compact-peers
       - feature/v088-zerotier-readonly
+      - fix/v088-tailscale-reachability
   pull_request:
     branches:
       - feature/v087-pixel-compact-peers
+      - feature/v088-zerotier-readonly
       - master
       - integration/v080-awg31-tailscale-prep-20261011
       - feature/ts-shared-users-activity
@@ -52,6 +54,9 @@ jobs:
 
       - name: Offline Tailscale initialization regression
         run: node tests/test_tailscale_startup.cjs
+
+      - name: Tailscale control-plane vs reachability regression
+        run: node tests/test_tailscale_reachability.cjs
 
       - name: Offline history chart SVG regression
         run: node tests/test_history_chart.cjs
