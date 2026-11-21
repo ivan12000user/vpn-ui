@@ -1,0 +1,34 @@
+name: IHOR VPN UI parity scripts
+
+on:
+  push:
+    branches:
+      - deploy/ihor-v088-parity
+    paths:
+      - 'deploy/ihor-v088/**'
+      - 'tests/test_ihor_v088.py'
+      - '.github/workflows/ihor-v088-parity.yml'
+  pull_request:
+    branches:
+      - feature/v088-zerotier-readonly
+    paths:
+      - 'deploy/ihor-v088/**'
+      - 'tests/test_ihor_v088.py'
+      - '.github/workflows/ihor-v088-parity.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  offline-verification:
+    name: No-secret IHOR deployment checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts (syntax only)
+        run: bash -n deploy/ihor-v088/audit.sh deploy/ihor-v088/install-ui.sh
+      - name: Validate embedded Python and destructive-action boundaries
+        run: python3 -m unittest discover -s tests -p test_ihor_v088.py -v
+      - name: Confirm no SSH or live VPN deployment in this workflow
+        run: echo 'Checks completed offline; no hosts or credentials were contacted.'
