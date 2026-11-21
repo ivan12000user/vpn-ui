@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const source = fs.readFileSync('src/web/mod.rs', 'utf8');
 const match = source.match(/const TAILSCALE_SCRIPT: &str = r#"([\s\S]*?)"#;/);
 assert.ok(match, 'Tailscale browser JS not found');
-assert.ok(source.includes('Доступность: не проверена'));
+assert.ok(source.includes('<span class="ts-reachability">Не проверен</span>'));
 
 function classList(initial = []) {
   const values = new Set(initial);
@@ -20,7 +20,7 @@ function classList(initial = []) {
 }
 
 function row(ip) {
-  const reach = {textContent:'Доступность: не проверена', classList:classList()};
+  const reach = {textContent:'Не проверен', classList:classList()};
   const pingTS = {textContent:'', classList:classList()};
   const pingICMP = {textContent:'', classList:classList()};
   const tsButton = {disabled:false, parentElement:{querySelector(){return pingTS;}}};
@@ -92,11 +92,12 @@ assert.equal(reachable.pingTS.textContent,'—');
 (async () => {
   await events.get('pingAll:click')();
   assert.equal(pingCalls,2);
-  assert.equal(noReply.reach.textContent,'Доступность: Нет ответа');
+  assert.equal(noReply.reach.textContent,'Нет ответа');
   assert.ok(noReply.classList.contains('reach-unavailable'));
-  assert.equal(reachable.reach.textContent,'Доступность: Доступен');
+  assert.equal(reachable.reach.textContent,'Доступен');
   assert.ok(!reachable.classList.contains('reach-unavailable'));
-  assert.match(misc['ts-reachable'].textContent,/доступно 1 \/ 2 проверено/);
+  assert.ok(reachable.classList.contains('reach-online'));
+  assert.match(misc['ts-reachable'].textContent,/Доступно 1 \/ 2 проверено/);
   assert.match(misc['ts-reachable'].textContent,/нет ответа: 1/);
   assert.equal(pingAll.disabled,false);
   console.log('TAILSCALE reachability: reported ONLINE vs TS Ping timeout PASS');
