@@ -4666,15 +4666,18 @@ const TAILSCALE_SCRIPT: &str = r#"
   }
   refresh.addEventListener('click', poll);
   filter.addEventListener('input', filterRows);
-  setInterval(() => { if (auto.checked && !document.hidden) poll(); }, 15000);
-  // Confirm reachability independently from reported Tailscale Online.
-  // At most four simultaneous TS Ping processes every two minutes.
-  poll().then(() => {
-    if (auto.checked && !document.hidden) probeAll(true);
-  });
+  // Refresh the control-plane view every 15s. Confirm reachability
+  // independently at most every two minutes, with four concurrent TS Pings.
+  // Do not run network operations during page initialization.
+  let lastAutoProbeAt = 0;
   setInterval(() => {
-    if (auto.checked && !document.hidden) probeAll(true);
-  }, 120000);
+    if (!auto.checked || document.hidden) return;
+    poll();
+    if (Date.now() - lastAutoProbeAt >= 120000) {
+      lastAutoProbeAt = Date.now();
+      probeAll(true);
+    }
+  }, 15000);
 })();
 "#;
 
