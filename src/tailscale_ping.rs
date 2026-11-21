@@ -106,12 +106,10 @@ fn parse_output(ip: &str, output: &str) -> OverlayPingResult {
 fn parse_helper_output(ip: &str, stdout: &str, success: bool) -> OverlayPingResult {
     let result = parse_output(ip, stdout);
     if !success && !result.ok {
-        let no_reply = stdout
-            .lines()
-            .any(|line| {
-                let line = line.to_ascii_lowercase();
-                line.contains("timed out") || line.contains("no reply")
-            });
+        let no_reply = stdout.lines().any(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("timed out") || line.contains("no reply")
+        });
         return OverlayPingResult::failed(
             ip,
             if no_reply {
@@ -217,11 +215,8 @@ mod tests {
     #[test]
     fn cli_timeout_is_distinct_from_helper_failure() {
         let ip = "100.125.53.1";
-        let timed_out = parse_helper_output(
-            ip,
-            "ping \"100.125.53.1\" timed out\nno reply\n",
-            false,
-        );
+        let timed_out =
+            parse_helper_output(ip, "ping \"100.125.53.1\" timed out\nno reply\n", false);
         assert!(!timed_out.ok);
         assert_eq!(timed_out.error.as_deref(), Some("timeout"));
 
