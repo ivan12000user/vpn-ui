@@ -482,7 +482,7 @@ fn tailscale_dashboard_card(status: &tailscale::TailStatus) -> String {
           <div class="card-head"><h2>Tailscale</h2><span class="badge {state_class}">{state_text}</span></div>
           <div class="value">tailscale0</div>
           <div class="muted mono">{ip}</div>
-          <div class="metric"><strong class="metric-online">{online}</strong> онлайн
+          <div class="metric"><strong class="metric-online">{online}</strong> ONLINE по Tailscale
           <span class="metric-separator">/</span><strong>{total}</strong> видимых</div>
         </a>"#,
         ip = escape_html(if status.self_ip.is_empty() {
@@ -511,7 +511,7 @@ fn tailscale_rows(status: &tailscale::TailStatus) -> String {
             r#"<tr class="status-{state_class}" data-ts-ip="{ping_ip}">
                 <td class="peer-name-cell" data-label="Имя"><strong class="peer-name">{name}</strong></td>
                 <td class="mono" data-label="Tailscale IP">{ip}</td>
-                <td data-label="Статус">{state}</td>
+                <td data-label="Статус TS"><span class="ts-control-status">{state}</span><small class="ts-reachability">Доступность: не проверена</small></td>
                 <td data-label="Обмен">{traffic}</td>
                 <td data-label="Exit-node">{exit}</td>
                 <td data-label="Relay">{relay}</td>
@@ -574,19 +574,19 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
         <div class="summary">
           <div><span>Устройство</span><strong id="ts-self">{hostname}</strong></div>
           <div><span>Tailscale IP</span><strong id="ts-ip">{ip}</strong></div>
-          <div><span>Видно / онлайн</span><strong id="ts-count">{total} / {online}</strong></div>
+          <div><span>Видно / ONLINE по Tailscale</span><strong id="ts-count">{total} / {online}</strong><small id="ts-reachable" class="muted">TS Ping: проверок ещё нет</small></div>
           <div><span>Exit-node / статус</span><strong id="ts-exit">{exit} · {backend}</strong></div>
         </div>
         <div class="panel">
           <h2>Участники Tailscale</h2>
           <div class="table-wrap tailscale-table">
             <table>
-              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Tailscale ping</th><th>ICMP</th></tr></thead>
+              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус TS / доступность</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Tailscale ping</th><th>ICMP</th></tr></thead>
               <tbody id="tailscale-rows">{rows}</tbody>
             </table>
           </div>
           <p class="muted" style="margin-top:16px">
-            Показаны только узлы, видимые этому VPS. Список приглашённых пользователей,
+            ONLINE — информация Tailscale, а не подтверждённая доступность. Последний TS Ping отображается отдельно и действует 3 минуты; отсутствие ответа не доказывает, что устройство выключено. Список приглашённых пользователей,
             которым расшарен exit-node, сюда не входит; он требует административных данных Tailscale.
           </p>
         </div>"#,
@@ -2459,6 +2459,19 @@ body.modal-open {
   }
 }
 
+/* Reachability is independent from Tailscale's control-plane Online flag. */
+.tailscale-table .ts-reachability {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.tailscale-table .ts-reachability.ok { color: var(--green); }
+.tailscale-table .ts-reachability.error { color: var(--red); }
+.tailscale-table tbody tr.status-ok.reach-unavailable { box-shadow: inset 4px 0 var(--red); }
+#ts-reachable { display: block; margin-top: 4px; font-size: 11px; }
+
 /* Tailscale rows have no VPN peer public-key; make them mobile cards too. */
 .tailscale-table tr[hidden] {
   display: none !important;
@@ -2477,6 +2490,9 @@ body.modal-open {
   }
   .tailscale-table tbody tr.status-ok {
     border-left-color: var(--green);
+  }
+  .tailscale-table tbody tr.status-ok.reach-unavailable {
+    border-left-color: var(--red);
   }
   .tailscale-table tbody tr.status-offline {
     border-left-color: var(--red);
@@ -4414,7 +4430,9 @@ const TAILSCALE_SCRIPT: &str = r#"
   const errors = document.getElementById('ts-error');
   const pingResults = new Map();
   const pingPending = new Set();
+  const PING_TTL_MS = 180000;
   let running = false;
+  let probing = false;
   const pingModes = {
     overlay: {route: '/api/tailscale/overlay-ping', css: '.ts-overlay-button'},
     icmp: {route: '/api/tailscale/ping', css: '.ts-ping-button'}
@@ -4422,6 +4440,62 @@ const TAILSCALE_SCRIPT: &str = r#"
   const pingKey = (mode, ip) => mode + ':' + ip;
 
   const val = value => value || '—';
+  function recentPing(mode, ip) {
+    const saved = pingResults.get(pingKey(mode, ip));
+    if (mode !== 'overlay') return saved;
+    return saved && Date.now() - saved.at < PING_TTL_MS ? saved : null;
+  }
+  function reachability(ip) {
+    if (!ip) return {text:'Нет IP', kind:'unknown', checked:false};
+    if (pingPending.has(pingKey('overlay', ip))) {
+      return {text:'Проверяется', kind:'unknown', checked:false};
+    }
+    const saved = recentPing('overlay', ip);
+    if (!saved) return {text:'Не проверен', kind:'unknown', checked:false};
+    if (saved.ok) return {text:'Доступен', kind:'online', checked:true};
+    if (saved.failure === 'timeout') {
+      return {text:'Нет ответа', kind:'unreachable', checked:true};
+    }
+    return {text:'Ошибка проверки', kind:'unknown', checked:true};
+  }
+  function updateReachability() {
+    let checked = 0;
+    let reachable = 0;
+    let noReply = 0;
+    for (const row of tbody.rows) {
+      const state = reachability(row.dataset.tsIp || '');
+      const label = row.querySelector('.ts-reachability');
+      if (!label) continue;
+      label.textContent = 'Доступность: ' + state.text;
+      label.classList.toggle('ok', state.kind === 'online');
+      label.classList.toggle('error', state.kind === 'unreachable');
+      row.classList.toggle('reach-unavailable', state.kind === 'unreachable');
+      if (state.checked) {
+        checked++;
+        if (state.kind === 'online') reachable++;
+        if (state.kind === 'unreachable') noReply++;
+      }
+    }
+    const summary = document.getElementById('ts-reachable');
+    if (summary) {
+      summary.textContent = checked
+        ? 'TS Ping: доступно ' + reachable + ' / ' + checked +
+          ' проверено · нет ответа: ' + noReply
+        : 'TS Ping: проверок ещё нет';
+    }
+  }
+  function controlCell(row, peer) {
+    const td = document.createElement('td');
+    td.dataset.label = 'Статус TS';
+    const state = document.createElement('span');
+    state.className = 'ts-control-status';
+    state.textContent = peer.online ? 'ONLINE' : 'OFFLINE';
+    const reach = document.createElement('small');
+    reach.className = 'ts-reachability';
+    reach.textContent = 'Доступность: не проверена';
+    td.append(state, reach);
+    row.appendChild(td);
+  }
   function cell(row, label, value, css) {
     const td = document.createElement('td');
     td.dataset.label = label;
@@ -4437,7 +4511,7 @@ const TAILSCALE_SCRIPT: &str = r#"
     const result = button?.parentElement.querySelector('.ping-result');
     if (!result || !button) return;
     const pending = pingPending.has(key);
-    const saved = pingResults.get(key);
+    const saved = recentPing(mode, ip);
     result.textContent = pending ? '...' : (saved ? saved.text : '—');
     result.classList.toggle('ok', !pending && saved?.ok === true);
     result.classList.toggle('error', !pending && saved?.ok === false);
@@ -4461,6 +4535,7 @@ const TAILSCALE_SCRIPT: &str = r#"
     for (const row of tbody.rows) {
       if (row.dataset.tsIp === ip) applyPing(row, mode);
     }
+    if (mode === 'overlay') updateReachability();
   }
   async function pingPeer(ip, mode) {
     if (!ip || !pingModes[mode]) return;
@@ -4482,12 +4557,16 @@ const TAILSCALE_SCRIPT: &str = r#"
         ? ' · ' + (result.path || 'Tailscale') +
           (result.relay ? ' ' + result.relay : '')
         : '';
+      const reason = String(result.error || 'timeout');
       pingResults.set(key, {
         ok,
-        text: ok ? result.avg_ms.toFixed(1) + ' ms' + route : (result.error || 'timeout')
+        at: Date.now(),
+        failure: ok ? null : (/^(timeout|no reply|Tailscale ping unavailable)$/i.test(reason.trim())
+          ? 'timeout' : 'error'),
+        text: ok ? result.avg_ms.toFixed(1) + ' ms' + route : reason
       });
     } catch (_) {
-      pingResults.set(key, {ok:false, text:'ошибка'});
+      pingResults.set(key, {ok:false, at:Date.now(), failure:'error', text:'ошибка'});
     } finally {
       pingPending.delete(key);
       refreshPingRow(ip, mode);
@@ -4501,7 +4580,7 @@ const TAILSCALE_SCRIPT: &str = r#"
       tr.dataset.tsIp = peer.ip || '';
       cell(tr, 'Имя', val(peer.hostname), 'peer-name-cell');
       cell(tr, 'Tailscale IP', val(peer.ip), 'mono');
-      cell(tr, 'Статус', peer.online ? 'ONLINE' : 'OFFLINE');
+      controlCell(tr, peer);
       cell(tr, 'Обмен', peer.active ? 'Активен' : 'Нет обмена');
       cell(tr, 'Exit-node', peer.exit_node_option ? 'Да' : '—');
       cell(tr, 'Relay', val(peer.relay));
@@ -4518,6 +4597,7 @@ const TAILSCALE_SCRIPT: &str = r#"
     errors.textContent = data.error ? 'Не удалось получить Tailscale: ' + data.error : '';
     errors.className = data.error ? 'alert error' : '';
     filterRows();
+    updateReachability();
   }
   function filterRows() {
     const query = filter.value.trim().toLocaleLowerCase('ru');
@@ -4551,20 +4631,33 @@ const TAILSCALE_SCRIPT: &str = r#"
       if (row) pingPeer(row.dataset.tsIp, mode);
     }
   });
-  pingAll?.addEventListener('click', async () => {
-    const ips = [...new Set(Array.from(tbody.rows)
-      .map(row => row.dataset.tsIp).filter(Boolean))];
-    pingAll.disabled = true;
+  async function probeAll(onlyOnline) {
+    if (probing) return;
+    const selected = Array.from(tbody.rows)
+      .filter(row => !onlyOnline || row.classList.contains('status-ok'))
+      .map(row => row.dataset.tsIp).filter(Boolean);
+    const ips = [...new Set(selected)];
+    probing = true;
+    if (pingAll) {
+      pingAll.disabled = true;
+      pingAll.textContent = onlyOnline ? 'Автопроверка TS' : 'Проверка 0/' + ips.length;
+    }
     try {
       for (let i = 0; i < ips.length; i += 4) {
-        pingAll.textContent = 'Проверка ' + i + '/' + ips.length;
+        if (pingAll && !onlyOnline) {
+          pingAll.textContent = 'Проверка ' + i + '/' + ips.length;
+        }
         await Promise.all(ips.slice(i, i + 4).map(ip => pingPeer(ip, 'overlay')));
       }
     } finally {
-      pingAll.disabled = false;
-      pingAll.textContent = 'Проверить все TS';
+      probing = false;
+      if (pingAll) {
+        pingAll.disabled = false;
+        pingAll.textContent = 'Проверить все TS';
+      }
     }
-  });
+  }
+  pingAll?.addEventListener('click', () => probeAll(false));
   // Initialize each ping mode separately; otherwise applyPing() receives
   // an undefined mode and aborts the rest of the Tailscale page script.
   for (const row of tbody.rows) {
@@ -4573,7 +4666,18 @@ const TAILSCALE_SCRIPT: &str = r#"
   }
   refresh.addEventListener('click', poll);
   filter.addEventListener('input', filterRows);
-  setInterval(() => { if (auto.checked && !document.hidden) poll(); }, 15000);
+  // Refresh the control-plane view every 15s. Confirm reachability
+  // independently at most every two minutes, with four concurrent TS Pings.
+  // Do not run network operations during page initialization.
+  let lastAutoProbeAt = 0;
+  setInterval(() => {
+    if (!auto.checked || document.hidden) return;
+    poll();
+    if (Date.now() - lastAutoProbeAt >= 120000) {
+      lastAutoProbeAt = Date.now();
+      probeAll(true);
+    }
+  }, 15000);
 })();
 "#;
 
@@ -4683,6 +4787,32 @@ mod empty_peer_table_tests {
         assert!(TAILSCALE_SCRIPT.contains("applyPing(row, 'overlay');"));
         assert!(TAILSCALE_SCRIPT.contains("applyPing(row, 'icmp');"));
         assert!(!TAILSCALE_SCRIPT.contains("applyPing(row);"));
+    }
+
+    #[test]
+    fn tailscale_control_plane_online_is_not_confirmed_reachability() {
+        let status = tailscale::TailStatus {
+            online_count: 1,
+            peers: vec![tailscale::TailPeer {
+                hostname: "pl-vmpico-new".into(),
+                ip: "100.88.88.1".into(),
+                online: true,
+                active: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let html = tailscale_page_body(&status);
+        assert!(html.contains("Видно / ONLINE по Tailscale"));
+        assert!(html.contains("id=\"ts-reachable\""));
+        assert!(html.contains("Статус TS / доступность"));
+        assert!(html.contains("Доступность: не проверена"));
+        assert!(html.contains("data-ts-ip=\"100.88.88.1\""));
+        assert!(TAILSCALE_SCRIPT.contains("const PING_TTL_MS = 180000;"));
+        assert!(TAILSCALE_SCRIPT.contains("text:'Нет ответа', kind:'unreachable'"));
+        assert!(TAILSCALE_SCRIPT.contains("text:'Не проверен', kind:'unknown'"));
+        assert!(TAILSCALE_SCRIPT.contains("probeAll(true)"));
+        assert!(TAILSCALE_SCRIPT.contains("controlCell(tr, peer);"));
     }
 
     #[test]
