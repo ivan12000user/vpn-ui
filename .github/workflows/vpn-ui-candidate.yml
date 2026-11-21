@@ -10,8 +10,13 @@ on:
       - fix/v085-history-single-points
       - feature/v086-pixel-mobile-ui
       - feature/v087-pixel-compact-peers
+      - feature/v088-zerotier-readonly
+      - fix/v088-tailscale-reachability
+      - fix/v088-primary-reachability
   pull_request:
     branches:
+      - feature/v087-pixel-compact-peers
+      - feature/v088-zerotier-readonly
       - master
       - integration/v080-awg31-tailscale-prep-20261011
       - feature/ts-shared-users-activity
@@ -51,6 +56,9 @@ jobs:
       - name: Offline Tailscale initialization regression
         run: node tests/test_tailscale_startup.cjs
 
+      - name: Tailscale control-plane vs reachability regression
+        run: node tests/test_tailscale_reachability.cjs
+
       - name: Offline history chart SVG regression
         run: node tests/test_history_chart.cjs
 
@@ -59,6 +67,23 @@ jobs:
 
       - name: Build release executable
         run: cargo +1.98.0 build --release --locked
+
+      - name: ZeroTier read-only and rollback regressions
+        run: python3 -m unittest discover -s tests -p test_zerotier.py -v
+
+      - name: Pixel ZeroTier browser layout
+        run: |
+          python3 -m pip install playwright==1.56.0
+          python3 -m playwright install --with-deps chromium
+          python3 tests/pixel_zerotier.py
+
+      - name: Save ZeroTier screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerotier-layout
+          path: test-artifacts/
+          if-no-files-found: ignore
 
       - name: Stage installation safely in disposable filesystem
         run: python3 tests/stage_deployment.py

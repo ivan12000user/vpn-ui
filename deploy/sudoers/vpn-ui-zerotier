@@ -1,0 +1,4 @@
+# No wildcard arguments, no token-file access, no join/leave/set permission.
+vpn-ui ALL=(root) NOPASSWD: /usr/sbin/zerotier-cli -j info
+vpn-ui ALL=(root) NOPASSWD: /usr/sbin/zerotier-cli -j listnetworks
+vpn-ui ALL=(root) NOPASSWD: /usr/sbin/zerotier-cli -j listpeers

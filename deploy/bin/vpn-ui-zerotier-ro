@@ -1,0 +1,9 @@
+#!/bin/sh
+# Root-owned executable; only the three local JSON reads are permitted.
+set -eu
+[ "$#" -eq 2 ] && [ "$1" = -j ] || exit 64
+case "$2" in
+  info|listnetworks|listpeers) ;;
+  *) exit 64 ;;
+esac
+exec /usr/bin/sudo -n /usr/sbin/zerotier-cli -j "$2"

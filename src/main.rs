@@ -9,6 +9,7 @@ mod tailscale_admin;
 mod tailscale_ping;
 mod vpn;
 mod web;
+mod zerotier;
 
 use crate::geoip::GeoIpService;
 use crate::vpn::common::ProviderConfig;
@@ -42,14 +43,6 @@ async fn main() {
             interface: env::var("VPN_UI_WG_INTERFACE").unwrap_or_else(|_| "wg0".to_string()),
         },
 
-        amneziawg: ProviderConfig {
-            label: "AmneziaWG".to_string(),
-            command: env::var("VPN_UI_AWG_COMMAND").unwrap_or_else(|_| "awg".to_string()),
-            metadata_command: env::var("VPN_UI_AWG_METADATA_COMMAND")
-                .unwrap_or_else(|_| "vpn-ui-awg-meta".to_string()),
-            interface: env::var("VPN_UI_AWG_INTERFACE").unwrap_or_else(|_| "awg0".to_string()),
-        },
-
         amneziawg31: ProviderConfig {
             label: "AmneziaWG 3.1".to_string(),
             command: env::var("VPN_UI_AWG31_COMMAND").unwrap_or_else(|_| "awg".to_string()),
@@ -64,26 +57,17 @@ async fn main() {
         wg_settings_command: env::var("VPN_UI_WG_SETTINGS_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-wg-settings".to_string()),
 
-        awg_settings_command: env::var("VPN_UI_AWG_SETTINGS_COMMAND")
-            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg-settings".to_string()),
-
         wg_client_config_command: env::var("VPN_UI_WG_CLIENT_CONFIG_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-wg-client-config".to_string()),
 
         awg31_settings_command: env::var("VPN_UI_AWG31_SETTINGS_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg31-settings".to_string()),
 
-        awg_client_config_command: env::var("VPN_UI_AWG_CLIENT_CONFIG_COMMAND")
-            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg-client-config".to_string()),
-
         awg31_client_config_command: env::var("VPN_UI_AWG31_CLIENT_CONFIG_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-awg31-client-config".to_string()),
 
         wg_manage_command: env::var("VPN_UI_WG_MANAGE_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-manage-wg".to_string()),
-
-        awg_manage_command: env::var("VPN_UI_AWG_MANAGE_COMMAND")
-            .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-manage-awg".to_string()),
 
         awg31_manage_command: env::var("VPN_UI_AWG31_MANAGE_COMMAND")
             .unwrap_or_else(|_| "/usr/local/bin/vpn-ui-manage-awg31".to_string()),

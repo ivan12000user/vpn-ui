@@ -20,19 +20,15 @@ use tokio::process::Command;
 #[derive(Clone)]
 pub struct AppState {
     pub wireguard: ProviderConfig,
-    pub amneziawg: ProviderConfig,
     pub amneziawg31: ProviderConfig,
     pub ping_command: String,
     pub wg_settings_command: String,
-    pub awg_settings_command: String,
     pub awg31_settings_command: String,
 
     pub wg_client_config_command: String,
-    pub awg_client_config_command: String,
     pub awg31_client_config_command: String,
 
     pub wg_manage_command: String,
-    pub awg_manage_command: String,
     pub awg31_manage_command: String,
 
     pub geoip: GeoIpService,
@@ -65,8 +61,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/wireguard", get(wireguard_page))
-        .route("/amneziawg", get(amneziawg_page))
         .route("/amneziawg31", get(amneziawg31_page))
+        .route("/zerotier", get(zerotier_page))
+        .route("/api/zerotier/status", get(zerotier_api))
         .route("/tailscale", get(tailscale_page))
         .route("/api/tailscale/status", get(tailscale_api))
         .route("/api/tailscale/ping", post(tailscale_ping))
@@ -83,22 +80,15 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/wireguard/manage",
             post(crate::admin::wireguard_manage),
         )
-        .route(
-            "/api/admin/amneziawg/manage",
-            post(crate::admin::amneziawg_manage),
-        )
         .route("/api/wireguard/inventory", get(wireguard_inventory))
         .route(
             "/api/admin/amneziawg31/manage",
             post(crate::admin::amneziawg31_manage),
         )
-        .route("/api/amneziawg/inventory", get(amneziawg_inventory))
         .route("/api/amneziawg31/inventory", get(amneziawg31_inventory))
         .route("/api/wireguard/status", get(wireguard_api))
-        .route("/api/amneziawg/status", get(amneziawg_api))
         .route("/api/amneziawg31/status", get(amneziawg31_api))
         .route("/api/wireguard/ping", post(wireguard_ping))
-        .route("/api/amneziawg/ping", post(amneziawg_ping))
         .route("/api/amneziawg31/ping", post(amneziawg31_ping))
         .route("/healthz", get(health))
         .with_state(state)
@@ -128,9 +118,8 @@ async fn admin_auth() -> impl IntoResponse {
 }
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
-    let (wg, awg, awg31, ts) = tokio::join!(
+    let (wg, awg31, ts) = tokio::join!(
         wireguard::status(&state.wireguard),
-        amneziawg::status(&state.amneziawg),
         amneziawg::status(&state.amneziawg31),
         tailscale::status()
     );
@@ -151,7 +140,7 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
 <p class="muted">Версия {}.</p>
 "#,
         dashboard_card("/wireguard", &wg),
-        dashboard_card("/amneziawg", &awg),
+        crate::zerotier::dashboard_card(),
         dashboard_card("/amneziawg31", &awg31),
         tailscale_dashboard_card(&ts),
         env!("CARGO_PKG_VERSION")
@@ -166,12 +155,6 @@ async fn wireguard_page(State(state): State<AppState>) -> impl IntoResponse {
     Html(layout("WireGuard", &provider_page("wireguard", &status)))
 }
 
-async fn amneziawg_page(State(state): State<AppState>) -> impl IntoResponse {
-    let mut status = amneziawg::status(&state.amneziawg).await;
-    enrich_status(&state.geoip, &mut status).await;
-    Html(layout("AmneziaWG", &provider_page("amneziawg", &status)))
-}
-
 async fn amneziawg31_page(State(state): State<AppState>) -> impl IntoResponse {
     let mut status = amneziawg::status(&state.amneziawg31).await;
     enrich_status(&state.geoip, &mut status).await;
@@ -183,10 +166,6 @@ async fn amneziawg31_page(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn wireguard_inventory(State(state): State<AppState>) -> impl IntoResponse {
     inventory_api(&state.wg_manage_command).await
-}
-
-async fn amneziawg_inventory(State(state): State<AppState>) -> impl IntoResponse {
-    inventory_api(&state.awg_manage_command).await
 }
 
 async fn amneziawg31_inventory(State(state): State<AppState>) -> impl IntoResponse {
@@ -356,12 +335,6 @@ async fn wireguard_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
     Json(status)
 }
 
-async fn amneziawg_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
-    let mut status = amneziawg::status(&state.amneziawg).await;
-    enrich_status(&state.geoip, &mut status).await;
-    Json(status)
-}
-
 async fn amneziawg31_api(State(state): State<AppState>) -> Json<InterfaceStatus> {
     let mut status = amneziawg::status(&state.amneziawg31).await;
     enrich_status(&state.geoip, &mut status).await;
@@ -373,14 +346,6 @@ async fn wireguard_ping(
     Json(request): Json<PingRequest>,
 ) -> Json<PingResult> {
     let status = wireguard::status(&state.wireguard).await;
-    Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
-}
-
-async fn amneziawg_ping(
-    State(state): State<AppState>,
-    Json(request): Json<PingRequest>,
-) -> Json<PingResult> {
-    let status = amneziawg::status(&state.amneziawg).await;
     Json(ping_known_peer(&state.ping_command, &status, &request.public_key).await)
 }
 
@@ -488,6 +453,21 @@ async fn tailscale_shares_api() -> impl IntoResponse {
     )
 }
 
+async fn zerotier_api() -> impl IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(crate::zerotier::status().await),
+    )
+}
+async fn zerotier_page() -> impl IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Html(layout(
+            "ZeroTier",
+            &crate::zerotier::page(&crate::zerotier::status().await),
+        )),
+    )
+}
 async fn tailscale_page() -> impl IntoResponse {
     let status = tailscale::status().await;
     Html(layout("Tailscale", &tailscale_page_body(&status)))
@@ -502,7 +482,7 @@ fn tailscale_dashboard_card(status: &tailscale::TailStatus) -> String {
           <div class="card-head"><h2>Tailscale</h2><span class="badge {state_class}">{state_text}</span></div>
           <div class="value">tailscale0</div>
           <div class="muted mono">{ip}</div>
-          <div class="metric"><strong class="metric-online">{online}</strong> онлайн
+          <div class="metric"><strong class="metric-online">{online}</strong> ONLINE по Tailscale
           <span class="metric-separator">/</span><strong>{total}</strong> видимых</div>
         </a>"#,
         ip = escape_html(if status.self_ip.is_empty() {
@@ -531,7 +511,7 @@ fn tailscale_rows(status: &tailscale::TailStatus) -> String {
             r#"<tr class="status-{state_class}" data-ts-ip="{ping_ip}">
                 <td class="peer-name-cell" data-label="Имя"><strong class="peer-name">{name}</strong></td>
                 <td class="mono" data-label="Tailscale IP">{ip}</td>
-                <td data-label="Статус">{state}</td>
+                <td data-label="Доступность"><span class="ts-reachability">Не проверен</span><small class="ts-control-status">Tailscale: {state}</small></td>
                 <td data-label="Обмен">{traffic}</td>
                 <td data-label="Exit-node">{exit}</td>
                 <td data-label="Relay">{relay}</td>
@@ -594,19 +574,19 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
         <div class="summary">
           <div><span>Устройство</span><strong id="ts-self">{hostname}</strong></div>
           <div><span>Tailscale IP</span><strong id="ts-ip">{ip}</strong></div>
-          <div><span>Видно / онлайн</span><strong id="ts-count">{total} / {online}</strong></div>
+          <div><span>Доступность по TS Ping</span><strong id="ts-reachable">Не проверено</strong><small id="ts-count" class="muted">По Tailscale: {online} ONLINE из {total} видимых</small></div>
           <div><span>Exit-node / статус</span><strong id="ts-exit">{exit} · {backend}</strong></div>
         </div>
         <div class="panel">
           <h2>Участники Tailscale</h2>
           <div class="table-wrap tailscale-table">
             <table>
-              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Tailscale ping</th><th>ICMP</th></tr></thead>
+              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Доступность / статус TS</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Tailscale ping</th><th>ICMP</th></tr></thead>
               <tbody id="tailscale-rows">{rows}</tbody>
             </table>
           </div>
           <p class="muted" style="margin-top:16px">
-            Показаны только узлы, видимые этому VPS. Список приглашённых пользователей,
+            Главный статус — результат TS Ping, действительный 3 минуты. Tailscale ONLINE/OFFLINE указан отдельно и не доказывает фактическую доступность. «Нет ответа» не обязательно означает, что устройство выключено. Список приглашённых пользователей,
             которым расшарен exit-node, сюда не входит; он требует административных данных Tailscale.
           </p>
         </div>"#,
@@ -708,7 +688,7 @@ async fn read_settings(command: &str) -> SettingsResult {
 async fn settings_page(State(state): State<AppState>) -> impl IntoResponse {
     let (wg, awg) = tokio::join!(
         read_settings(&state.wg_settings_command),
-        read_settings(&state.awg_settings_command)
+        read_settings(&state.awg31_settings_command)
     );
 
     let wg_fields = [
@@ -756,7 +736,12 @@ async fn settings_page(State(state): State<AppState>) -> impl IntoResponse {
 </div>
 "#,
         wg = settings_panel("WireGuard", &state.wireguard.interface, &wg, &wg_fields),
-        awg = settings_panel("AmneziaWG", &state.amneziawg.interface, &awg, &awg_fields),
+        awg = settings_panel(
+            "AmneziaWG 3.1",
+            &state.amneziawg31.interface,
+            &awg,
+            &awg_fields
+        ),
     );
 
     Html(layout("Настройки", &body))
@@ -2474,6 +2459,36 @@ body.modal-open {
   }
 }
 
+/* Measured reachability is primary; control-plane Online is secondary. */
+.tailscale-table .ts-reachability {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.tailscale-table .ts-control-status {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.tailscale-table .ts-reachability.ok { color: var(--green); }
+.tailscale-table .ts-reachability.error { color: var(--red); }
+/* Override generic VPN-peer status decoration for Tailscale: a stale
+   control-plane ONLINE must not paint an unverified host green. */
+.tailscale-table tbody tr[data-ts-ip] td { background: transparent; }
+.tailscale-table tbody tr[data-ts-ip] .peer-name-cell {
+  box-shadow: inset 4px 0 0 var(--muted);
+}
+.tailscale-table tbody tr[data-ts-ip].reach-online .peer-name-cell {
+  box-shadow: inset 4px 0 0 var(--green);
+}
+.tailscale-table tbody tr[data-ts-ip].reach-unavailable .peer-name-cell {
+  box-shadow: inset 4px 0 0 var(--red);
+}
+#ts-count { display: block; margin-top: 4px; font-size: 11px; font-weight: 400; }
+
 /* Tailscale rows have no VPN peer public-key; make them mobile cards too. */
 .tailscale-table tr[hidden] {
   display: none !important;
@@ -2490,10 +2505,10 @@ body.modal-open {
     border-left: 4px solid var(--muted);
     border-radius: 10px;
   }
-  .tailscale-table tbody tr.status-ok {
+  .tailscale-table tbody tr[data-ts-ip].reach-online {
     border-left-color: var(--green);
   }
-  .tailscale-table tbody tr.status-offline {
+  .tailscale-table tbody tr[data-ts-ip].reach-unavailable {
     border-left-color: var(--red);
   }
   .tailscale-table tbody td {
@@ -2558,13 +2573,8 @@ body.modal-open {
     font-size: 13px;
     overflow-wrap: anywhere;
   }
-  .tailscale-table tbody tr.status-ok[data-ts-ip] > td:nth-child(3) {
-    color: var(--green);
-    font-weight: 700;
-  }
-  .tailscale-table tbody tr.status-offline[data-ts-ip] > td:nth-child(3) {
-    color: var(--red);
-    font-weight: 700;
+  .tailscale-table tbody tr[data-ts-ip] > td:nth-child(3) {
+    color: var(--text);
   }
   .tailscale-table tbody tr[data-ts-ip] > td:nth-child(7) {
     grid-column: 1 / -1;
@@ -4429,7 +4439,9 @@ const TAILSCALE_SCRIPT: &str = r#"
   const errors = document.getElementById('ts-error');
   const pingResults = new Map();
   const pingPending = new Set();
+  const PING_TTL_MS = 180000;
   let running = false;
+  let probing = false;
   const pingModes = {
     overlay: {route: '/api/tailscale/overlay-ping', css: '.ts-overlay-button'},
     icmp: {route: '/api/tailscale/ping', css: '.ts-ping-button'}
@@ -4437,6 +4449,62 @@ const TAILSCALE_SCRIPT: &str = r#"
   const pingKey = (mode, ip) => mode + ':' + ip;
 
   const val = value => value || '—';
+  function recentPing(mode, ip) {
+    const saved = pingResults.get(pingKey(mode, ip));
+    if (mode !== 'overlay') return saved;
+    return saved && Date.now() - saved.at < PING_TTL_MS ? saved : null;
+  }
+  function reachability(ip) {
+    if (!ip) return {text:'Нет IP', kind:'unknown', checked:false};
+    if (pingPending.has(pingKey('overlay', ip))) {
+      return {text:'Проверяется', kind:'unknown', checked:false};
+    }
+    const saved = recentPing('overlay', ip);
+    if (!saved) return {text:'Не проверен', kind:'unknown', checked:false};
+    if (saved.ok) return {text:'Доступен', kind:'online', checked:true};
+    if (saved.failure === 'timeout') {
+      return {text:'Нет ответа', kind:'unreachable', checked:true};
+    }
+    return {text:'Ошибка проверки', kind:'unknown', checked:true};
+  }
+  function updateReachability() {
+    let checked = 0;
+    let reachable = 0;
+    let noReply = 0;
+    for (const row of tbody.rows) {
+      const state = reachability(row.dataset.tsIp || '');
+      const label = row.querySelector('.ts-reachability');
+      if (!label) continue;
+      label.textContent = state.text;
+      label.classList.toggle('ok', state.kind === 'online');
+      label.classList.toggle('error', state.kind === 'unreachable');
+      row.classList.toggle('reach-unavailable', state.kind === 'unreachable');
+      row.classList.toggle('reach-online', state.kind === 'online');
+      if (state.checked) {
+        checked++;
+        if (state.kind === 'online') reachable++;
+        if (state.kind === 'unreachable') noReply++;
+      }
+    }
+    const summary = document.getElementById('ts-reachable');
+    if (summary) {
+      summary.textContent = checked
+        ? 'Доступно ' + reachable + ' / ' + checked + ' проверено · нет ответа: ' + noReply
+        : 'Не проверено';
+    }
+  }
+  function controlCell(row, peer) {
+    const td = document.createElement('td');
+    td.dataset.label = 'Доступность';
+    const reach = document.createElement('span');
+    reach.className = 'ts-reachability';
+    reach.textContent = 'Не проверен';
+    const state = document.createElement('small');
+    state.className = 'ts-control-status';
+    state.textContent = 'Tailscale: ' + (peer.online ? 'ONLINE' : 'OFFLINE');
+    td.append(reach, state);
+    row.appendChild(td);
+  }
   function cell(row, label, value, css) {
     const td = document.createElement('td');
     td.dataset.label = label;
@@ -4452,7 +4520,7 @@ const TAILSCALE_SCRIPT: &str = r#"
     const result = button?.parentElement.querySelector('.ping-result');
     if (!result || !button) return;
     const pending = pingPending.has(key);
-    const saved = pingResults.get(key);
+    const saved = recentPing(mode, ip);
     result.textContent = pending ? '...' : (saved ? saved.text : '—');
     result.classList.toggle('ok', !pending && saved?.ok === true);
     result.classList.toggle('error', !pending && saved?.ok === false);
@@ -4476,6 +4544,7 @@ const TAILSCALE_SCRIPT: &str = r#"
     for (const row of tbody.rows) {
       if (row.dataset.tsIp === ip) applyPing(row, mode);
     }
+    if (mode === 'overlay') updateReachability();
   }
   async function pingPeer(ip, mode) {
     if (!ip || !pingModes[mode]) return;
@@ -4497,12 +4566,16 @@ const TAILSCALE_SCRIPT: &str = r#"
         ? ' · ' + (result.path || 'Tailscale') +
           (result.relay ? ' ' + result.relay : '')
         : '';
+      const reason = String(result.error || 'timeout');
       pingResults.set(key, {
         ok,
-        text: ok ? result.avg_ms.toFixed(1) + ' ms' + route : (result.error || 'timeout')
+        at: Date.now(),
+        failure: ok ? null : (/^(timeout|no reply)$/i.test(reason.trim())
+          ? 'timeout' : 'error'),
+        text: ok ? result.avg_ms.toFixed(1) + ' ms' + route : reason
       });
     } catch (_) {
-      pingResults.set(key, {ok:false, text:'ошибка'});
+      pingResults.set(key, {ok:false, at:Date.now(), failure:'error', text:'ошибка'});
     } finally {
       pingPending.delete(key);
       refreshPingRow(ip, mode);
@@ -4516,7 +4589,7 @@ const TAILSCALE_SCRIPT: &str = r#"
       tr.dataset.tsIp = peer.ip || '';
       cell(tr, 'Имя', val(peer.hostname), 'peer-name-cell');
       cell(tr, 'Tailscale IP', val(peer.ip), 'mono');
-      cell(tr, 'Статус', peer.online ? 'ONLINE' : 'OFFLINE');
+      controlCell(tr, peer);
       cell(tr, 'Обмен', peer.active ? 'Активен' : 'Нет обмена');
       cell(tr, 'Exit-node', peer.exit_node_option ? 'Да' : '—');
       cell(tr, 'Relay', val(peer.relay));
@@ -4527,12 +4600,13 @@ const TAILSCALE_SCRIPT: &str = r#"
     }
     document.getElementById('ts-self').textContent = val(data.self_hostname);
     document.getElementById('ts-ip').textContent = val(data.self_ip);
-    document.getElementById('ts-count').textContent = (data.peers || []).length + ' / ' + (data.online_count || 0);
+    document.getElementById('ts-count').textContent = 'По Tailscale: ' + (data.online_count || 0) + ' ONLINE из ' + (data.peers || []).length + ' видимых';
     document.getElementById('ts-exit').textContent =
       (data.self_exit_node_option ? 'Предлагается' : 'Нет') + ' · ' + val(data.backend_state);
     errors.textContent = data.error ? 'Не удалось получить Tailscale: ' + data.error : '';
     errors.className = data.error ? 'alert error' : '';
     filterRows();
+    updateReachability();
   }
   function filterRows() {
     const query = filter.value.trim().toLocaleLowerCase('ru');
@@ -4566,20 +4640,33 @@ const TAILSCALE_SCRIPT: &str = r#"
       if (row) pingPeer(row.dataset.tsIp, mode);
     }
   });
-  pingAll?.addEventListener('click', async () => {
-    const ips = [...new Set(Array.from(tbody.rows)
-      .map(row => row.dataset.tsIp).filter(Boolean))];
-    pingAll.disabled = true;
+  async function probeAll(onlyOnline) {
+    if (probing) return;
+    const selected = Array.from(tbody.rows)
+      .filter(row => !onlyOnline || row.classList.contains('status-ok'))
+      .map(row => row.dataset.tsIp).filter(Boolean);
+    const ips = [...new Set(selected)];
+    probing = true;
+    if (pingAll) {
+      pingAll.disabled = true;
+      pingAll.textContent = onlyOnline ? 'Автопроверка TS' : 'Проверка 0/' + ips.length;
+    }
     try {
       for (let i = 0; i < ips.length; i += 4) {
-        pingAll.textContent = 'Проверка ' + i + '/' + ips.length;
+        if (pingAll && !onlyOnline) {
+          pingAll.textContent = 'Проверка ' + i + '/' + ips.length;
+        }
         await Promise.all(ips.slice(i, i + 4).map(ip => pingPeer(ip, 'overlay')));
       }
     } finally {
-      pingAll.disabled = false;
-      pingAll.textContent = 'Проверить все TS';
+      probing = false;
+      if (pingAll) {
+        pingAll.disabled = false;
+        pingAll.textContent = 'Проверить все TS';
+      }
     }
-  });
+  }
+  pingAll?.addEventListener('click', () => probeAll(false));
   // Initialize each ping mode separately; otherwise applyPing() receives
   // an undefined mode and aborts the rest of the Tailscale page script.
   for (const row of tbody.rows) {
@@ -4588,14 +4675,25 @@ const TAILSCALE_SCRIPT: &str = r#"
   }
   refresh.addEventListener('click', poll);
   filter.addEventListener('input', filterRows);
-  setInterval(() => { if (auto.checked && !document.hidden) poll(); }, 15000);
+  // Refresh the control-plane view every 15s. Confirm reachability
+  // independently at most every two minutes, with four concurrent TS Pings.
+  // Do not run network operations during page initialization.
+  let lastAutoProbeAt = 0;
+  setInterval(() => {
+    if (!auto.checked || document.hidden) return;
+    poll();
+    if (Date.now() - lastAutoProbeAt >= 120000) {
+      lastAutoProbeAt = Date.now();
+      probeAll(true);
+    }
+  }, 15000);
 })();
 "#;
 
 pub(crate) fn layout(title: &str, body: &str) -> String {
     let overview_active = if title == "Обзор" { " active" } else { "" };
     let wireguard_active = if title == "WireGuard" { " active" } else { "" };
-    let amneziawg_active = if title == "AmneziaWG" { " active" } else { "" };
+    let zerotier_active = if title == "ZeroTier" { " active" } else { "" };
     let amneziawg31_active = if title == "AmneziaWG 3.1" {
         " active"
     } else {
@@ -4629,8 +4727,8 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
   <div class="nav-links-desktop">
     <a class="nav-link{overview_active}" href="/">Обзор</a>
     <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-    <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
     <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
+    <a class="nav-link{zerotier_active}" href="/zerotier">ZeroTier</a>
     <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
     <a class="nav-link{history_active}" href="/history">История</a>
     <a class="nav-link{settings_active}" href="/settings">Настройки</a>
@@ -4644,8 +4742,8 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
     <div class="mobile-nav-links">
       <a class="nav-link{overview_active}" href="/">Обзор</a>
       <a class="nav-link{wireguard_active}" href="/wireguard">WireGuard</a>
-      <a class="nav-link{amneziawg_active}" href="/amneziawg">AmneziaWG 2.0</a>
       <a class="nav-link{amneziawg31_active}" href="/amneziawg31">AmneziaWG 3.1</a>
+      <a class="nav-link{zerotier_active}" href="/zerotier">ZeroTier</a>
       <a class="nav-link{tailscale_active}" href="/tailscale">Tailscale</a>
       <a class="nav-link{history_active}" href="/history">История</a>
       <a class="nav-link{settings_active}" href="/settings">Настройки</a>
@@ -4664,7 +4762,7 @@ pub(crate) fn layout(title: &str, body: &str) -> String {
         tailscale_script = TAILSCALE_SCRIPT,
         overview_active = overview_active,
         wireguard_active = wireguard_active,
-        amneziawg_active = amneziawg_active,
+        zerotier_active = zerotier_active,
         amneziawg31_active = amneziawg31_active,
         tailscale_active = tailscale_active,
         history_active = history_active,
@@ -4701,6 +4799,34 @@ mod empty_peer_table_tests {
     }
 
     #[test]
+    fn tailscale_control_plane_online_is_not_confirmed_reachability() {
+        let status = tailscale::TailStatus {
+            online_count: 1,
+            peers: vec![tailscale::TailPeer {
+                hostname: "pl-vmpico-new".into(),
+                ip: "100.88.88.1".into(),
+                online: true,
+                active: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let html = tailscale_page_body(&status);
+        assert!(html.contains("Доступность по TS Ping"));
+        assert!(html.contains("id=\"ts-reachable\""));
+        assert!(html.contains("Доступность / статус TS"));
+        assert!(html.contains("<span class=\"ts-reachability\">Не проверен</span>"));
+        assert!(html.contains("data-ts-ip=\"100.88.88.1\""));
+        assert!(TAILSCALE_SCRIPT.contains("const PING_TTL_MS = 180000;"));
+        assert!(TAILSCALE_SCRIPT.contains("text:'Нет ответа', kind:'unreachable'"));
+        assert!(TAILSCALE_SCRIPT.contains("text:'Не проверен', kind:'unknown'"));
+        assert!(TAILSCALE_SCRIPT.contains("probeAll(true)"));
+        assert!(TAILSCALE_SCRIPT.contains("controlCell(tr, peer);"));
+        assert!(TAILSCALE_SCRIPT.contains("td.append(reach, state);"));
+        assert!(TAILSCALE_SCRIPT.contains("reach-online"));
+    }
+
+    #[test]
     fn mobile_menu_is_keyboard_accessible_and_desktop_layout_is_preserved() {
         let page = layout("История", "<p>probe</p>");
         assert!(page.contains("<details class=\"mobile-nav\">"));
@@ -4714,7 +4840,7 @@ mod empty_peer_table_tests {
         assert!(STYLE.contains("min-height: 46px"));
         for link in [
             "/wireguard",
-            "/amneziawg",
+            "/zerotier",
             "/amneziawg31",
             "/tailscale",
             "/history",

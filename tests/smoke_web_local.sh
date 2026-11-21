@@ -86,7 +86,7 @@ print("HEALTHZ PASS, version =", status["version"])
 PY
 
 # Read-only pages should degrade gracefully without installed VPN executables.
-for item in 'wireguard:WireGuard' 'amneziawg:AmneziaWG' \
+for item in 'wireguard:WireGuard' 'zerotier:ZeroTier' \
             'amneziawg31:AmneziaWG 3.1' 'tailscale:Tailscale'; do
   route="${item%%:*}"
   label="${item#*:}"
