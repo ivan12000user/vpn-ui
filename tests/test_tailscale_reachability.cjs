@@ -39,9 +39,10 @@ function row(ip) {
 
 const noReply = row('100.88.88.1');
 const reachable = row('100.88.88.14');
+const helperError = row('100.88.88.27');
 const events = new Map(), timers = [];
 const tbody = {
-  rows:[noReply,reachable],
+  rows:[noReply,reachable,helperError],
   addEventListener(name,callback){events.set('tbody:'+name,callback);}
 };
 const pingAll = {
@@ -74,6 +75,11 @@ const context = {
         ok:false,error:'timeout',avg_ms:null
       })});
     }
+    if (ip === '100.88.88.27') {
+      return Promise.resolve({ok:true,json:async()=>({
+        ok:false,error:'Tailscale ping unavailable',avg_ms:null
+      })});
+    }
     assert.equal(ip,'100.88.88.14');
     return Promise.resolve({ok:true,json:async()=>({
       ok:true,avg_ms:101.4,path:'DIRECT',relay:''
@@ -91,13 +97,15 @@ assert.equal(reachable.pingTS.textContent,'—');
 
 (async () => {
   await events.get('pingAll:click')();
-  assert.equal(pingCalls,2);
+  assert.equal(pingCalls,3);
   assert.equal(noReply.reach.textContent,'Нет ответа');
   assert.ok(noReply.classList.contains('reach-unavailable'));
   assert.equal(reachable.reach.textContent,'Доступен');
   assert.ok(!reachable.classList.contains('reach-unavailable'));
   assert.ok(reachable.classList.contains('reach-online'));
-  assert.match(misc['ts-reachable'].textContent,/Доступно 1 \/ 2 проверено/);
+  assert.equal(helperError.reach.textContent,'Ошибка проверки');
+  assert.ok(!helperError.classList.contains('reach-unavailable'));
+  assert.match(misc['ts-reachable'].textContent,/Доступно 1 \/ 3 проверено/);
   assert.match(misc['ts-reachable'].textContent,/нет ответа: 1/);
   assert.equal(pingAll.disabled,false);
   console.log('TAILSCALE reachability: reported ONLINE vs TS Ping timeout PASS');
