@@ -9,6 +9,7 @@ use tokio::process::Command;
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct TailPeer {
     pub hostname: String,
+    pub os_hostname: String,
     pub ip: String,
     pub owner: String,
     pub online: bool,
@@ -34,6 +35,26 @@ fn text_field(v: &Value, field: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+// Tailscale HostName is the OS-reported hostname; DNSName is built from
+// the canonical machine name used by MagicDNS and the admin Machines page.
+// Prefer the first validated DNS label, without leaking the tailnet suffix.
+fn console_machine_name(v: &Value) -> String {
+    let dns_name = text_field(v, "DNSName");
+    let dns = dns_name.trim_end_matches('.');
+    if let Some((label, suffix)) = dns.split_once('.') {
+        if !suffix.is_empty()
+            && !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        {
+            return label.to_owned();
+        }
+    }
+    text_field(v, "HostName")
 }
 
 fn bool_field(v: &Value, field: &str) -> bool {
@@ -72,7 +93,8 @@ fn parse_status(input: &[u8]) -> Result<TailStatus, String> {
                 .unwrap_or_default();
 
             peers.push(TailPeer {
-                hostname: text_field(v, "HostName"),
+                hostname: console_machine_name(v),
+                os_hostname: text_field(v, "HostName"),
                 ip: ipv4(v),
                 owner,
                 online: bool_field(v, "Online"),
@@ -93,7 +115,7 @@ fn parse_status(input: &[u8]) -> Result<TailStatus, String> {
 
     Ok(TailStatus {
         backend_state: text_field(&doc, "BackendState"),
-        self_hostname: text_field(self_node, "HostName"),
+        self_hostname: console_machine_name(self_node),
         self_ip: ipv4(self_node),
         self_exit_node_option: bool_field(self_node, "ExitNodeOption"),
         peers,
@@ -165,6 +187,57 @@ mod tests {
         assert_eq!(s.peers[0].owner, "owner@example.test");
         assert_eq!(s.peers[0].relay, "ams");
         assert!(s.peers[1].exit_node_option);
+    }
+
+    #[test]
+    fn dns_machine_name_precedes_os_hostname_as_in_admin_console() {
+        let status = parse_status(
+            br#"{
+              "BackendState":"Running",
+              "Self":{
+                "HostName":"pl-vmpico",
+                "DNSName":"pl-vmpico-hostkey.tail1234.ts.net.",
+                "TailscaleIPs":["100.88.88.100"]
+              },
+              "Peer":{
+                "node1":{
+                  "HostName":"pl-vmpico-new",
+                  "DNSName":"vds3081540-ihor.tail1234.ts.net.",
+                  "TailscaleIPs":["100.88.88.1"],
+                  "Online":true
+                },
+                "node2":{
+                  "HostName":"OpenWrt",
+                  "DNSName":"garage-cudy-wr3000u.tail1234.ts.net.",
+                  "TailscaleIPs":["100.88.88.15"]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(status.self_hostname, "pl-vmpico-hostkey");
+        let new_vps = status
+            .peers
+            .iter()
+            .find(|peer| peer.ip == "100.88.88.1")
+            .unwrap();
+        assert_eq!(new_vps.hostname, "vds3081540-ihor");
+        assert_eq!(new_vps.os_hostname, "pl-vmpico-new");
+        let garage = status
+            .peers
+            .iter()
+            .find(|peer| peer.ip == "100.88.88.15")
+            .unwrap();
+        assert_eq!(garage.hostname, "garage-cudy-wr3000u");
+    }
+
+    #[test]
+    fn missing_or_invalid_dns_name_falls_back_to_os_hostname() {
+        for dns in ["", ".tail.ts.net", "-invalid.tail.ts.net", "host."] {
+            let value = serde_json::json!({"HostName": "safe-host", "DNSName": dns});
+            assert_eq!(console_machine_name(&value), "safe-host", "{dns}");
+        }
     }
 
     #[test]
