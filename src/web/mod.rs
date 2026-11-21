@@ -4570,7 +4570,7 @@ const TAILSCALE_SCRIPT: &str = r#"
       pingResults.set(key, {
         ok,
         at: Date.now(),
-        failure: ok ? null : (/^(timeout|no reply|Tailscale ping unavailable)$/i.test(reason.trim())
+        failure: ok ? null : (/^(timeout|no reply)$/i.test(reason.trim())
           ? 'timeout' : 'error'),
         text: ok ? result.avg_ms.toFixed(1) + ' ms' + route : reason
       });
