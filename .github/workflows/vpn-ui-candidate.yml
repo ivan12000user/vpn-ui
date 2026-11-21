@@ -12,6 +12,7 @@ on:
       - feature/v087-pixel-compact-peers
       - feature/v088-zerotier-readonly
       - fix/v088-tailscale-reachability
+      - fix/v088-primary-reachability
   pull_request:
     branches:
       - feature/v087-pixel-compact-peers
