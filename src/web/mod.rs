@@ -482,7 +482,7 @@ fn tailscale_dashboard_card(status: &tailscale::TailStatus) -> String {
           <div class="card-head"><h2>Tailscale</h2><span class="badge {state_class}">{state_text}</span></div>
           <div class="value">tailscale0</div>
           <div class="muted mono">{ip}</div>
-          <div class="metric"><strong class="metric-online">{online}</strong> онлайн
+          <div class="metric"><strong class="metric-online">{online}</strong> ONLINE по Tailscale
           <span class="metric-separator">/</span><strong>{total}</strong> видимых</div>
         </a>"#,
         ip = escape_html(if status.self_ip.is_empty() {
@@ -511,7 +511,7 @@ fn tailscale_rows(status: &tailscale::TailStatus) -> String {
             r#"<tr class="status-{state_class}" data-ts-ip="{ping_ip}">
                 <td class="peer-name-cell" data-label="Имя"><strong class="peer-name">{name}</strong></td>
                 <td class="mono" data-label="Tailscale IP">{ip}</td>
-                <td data-label="Статус">{state}</td>
+                <td data-label="Статус TS"><span class="ts-control-status">{state}</span><small class="ts-reachability">Доступность: не проверена</small></td>
                 <td data-label="Обмен">{traffic}</td>
                 <td data-label="Exit-node">{exit}</td>
                 <td data-label="Relay">{relay}</td>
@@ -574,19 +574,19 @@ fn tailscale_page_body(status: &tailscale::TailStatus) -> String {
         <div class="summary">
           <div><span>Устройство</span><strong id="ts-self">{hostname}</strong></div>
           <div><span>Tailscale IP</span><strong id="ts-ip">{ip}</strong></div>
-          <div><span>Видно / онлайн</span><strong id="ts-count">{total} / {online}</strong></div>
+          <div><span>Видно / ONLINE по Tailscale</span><strong id="ts-count">{total} / {online}</strong><small id="ts-reachable" class="muted">TS Ping: проверок ещё нет</small></div>
           <div><span>Exit-node / статус</span><strong id="ts-exit">{exit} · {backend}</strong></div>
         </div>
         <div class="panel">
           <h2>Участники Tailscale</h2>
           <div class="table-wrap tailscale-table">
             <table>
-              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Tailscale ping</th><th>ICMP</th></tr></thead>
+              <thead><tr><th>Имя</th><th>Tailscale IP</th><th>Статус TS / доступность</th><th>Обмен</th><th>Exit-node</th><th>Relay</th><th>Владелец</th><th>Tailscale ping</th><th>ICMP</th></tr></thead>
               <tbody id="tailscale-rows">{rows}</tbody>
             </table>
           </div>
           <p class="muted" style="margin-top:16px">
-            Показаны только узлы, видимые этому VPS. Список приглашённых пользователей,
+            ONLINE — информация Tailscale, а не подтверждённая доступность. Последний TS Ping отображается отдельно и действует 3 минуты; отсутствие ответа не доказывает, что устройство выключено. Список приглашённых пользователей,
             которым расшарен exit-node, сюда не входит; он требует административных данных Tailscale.
           </p>
         </div>"#,
@@ -2459,6 +2459,19 @@ body.modal-open {
   }
 }
 
+/* Reachability is independent from Tailscale's control-plane Online flag. */
+.tailscale-table .ts-reachability {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.tailscale-table .ts-reachability.ok { color: var(--green); }
+.tailscale-table .ts-reachability.error { color: var(--red); }
+.tailscale-table tbody tr.status-ok.reach-unavailable { box-shadow: inset 4px 0 var(--red); }
+#ts-reachable { display: block; margin-top: 4px; font-size: 11px; }
+
 /* Tailscale rows have no VPN peer public-key; make them mobile cards too. */
 .tailscale-table tr[hidden] {
   display: none !important;
@@ -2477,6 +2490,9 @@ body.modal-open {
   }
   .tailscale-table tbody tr.status-ok {
     border-left-color: var(--green);
+  }
+  .tailscale-table tbody tr.status-ok.reach-unavailable {
+    border-left-color: var(--red);
   }
   .tailscale-table tbody tr.status-offline {
     border-left-color: var(--red);
@@ -4683,6 +4699,32 @@ mod empty_peer_table_tests {
         assert!(TAILSCALE_SCRIPT.contains("applyPing(row, 'overlay');"));
         assert!(TAILSCALE_SCRIPT.contains("applyPing(row, 'icmp');"));
         assert!(!TAILSCALE_SCRIPT.contains("applyPing(row);"));
+    }
+
+    #[test]
+    fn tailscale_control_plane_online_is_not_confirmed_reachability() {
+        let status = tailscale::TailStatus {
+            online_count: 1,
+            peers: vec![tailscale::TailPeer {
+                hostname: "pl-vmpico-new".into(),
+                ip: "100.88.88.1".into(),
+                online: true,
+                active: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let html = tailscale_page_body(&status);
+        assert!(html.contains("Видно / ONLINE по Tailscale"));
+        assert!(html.contains("id=\"ts-reachable\""));
+        assert!(html.contains("Статус TS / доступность"));
+        assert!(html.contains("Доступность: не проверена"));
+        assert!(html.contains("data-ts-ip=\"100.88.88.1\""));
+        assert!(TAILSCALE_SCRIPT.contains("const PING_TTL_MS = 180000;"));
+        assert!(TAILSCALE_SCRIPT.contains("text:'Нет ответа', kind:'unreachable'"));
+        assert!(TAILSCALE_SCRIPT.contains("text:'Не проверен', kind:'unknown'"));
+        assert!(TAILSCALE_SCRIPT.contains("probeAll(true)"));
+        assert!(TAILSCALE_SCRIPT.contains("controlCell(tr, peer);"));
     }
 
     #[test]
