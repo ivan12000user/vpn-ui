@@ -49,7 +49,9 @@ fn console_machine_name(v: &Value) -> String {
             && label.len() <= 63
             && !label.starts_with('-')
             && !label.ends_with('-')
-            && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            && label
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
         {
             return label.to_owned();
         }
